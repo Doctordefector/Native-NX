@@ -80,6 +80,30 @@ void runtime_trace_guest(uint64_t fp, uint64_t lr) {
     }
 }
 
+// [nxrecomp] a register that points into a loaded module at text (ASCII or UTF-16) is printed as that text: an
+// engine's assert message is often only in a static buffer at the crash (Pikmin 4: Unreal's FDebug buffer).
+static void print_text_at(const char *reg, uint64_t a) {
+    for (int i = 0; i < g_nmodules; i++) {
+        const Module *m = &g_modules[i];
+        if (a < m->base || a + 2 > m->base + m->size) continue;
+        const uint8_t *p = (const uint8_t *)(uintptr_t)a;
+        uint64_t room = m->base + m->size - a;
+        char out[240];
+        size_t n = 0;
+        int wide = room >= 4 && p[1] == 0 && p[0] >= 0x20 && p[0] < 0x7f && p[2] >= 0x20 && p[3] == 0;
+        for (uint64_t k = 0; n < sizeof out - 1 && k + (wide ? 1 : 0) < room; k += wide ? 2 : 1) {
+            uint8_t ch = p[k];
+            if (wide && p[k + 1]) break;
+            if (ch == '\n') { out[n++] = '|'; continue; }
+            if (ch < 0x20 || ch >= 0x7f) break;
+            out[n++] = (char)ch;
+        }
+        out[n] = 0;
+        if (n >= 4) fprintf(stderr, "    %s -> %s\"%s\"\n", reg, wide ? "L" : "", out);
+        return;
+    }
+}
+
 // Crash report: the faulting thread's guest registers and guest call chain (src/runtime/dispatch.c rt_fault_report).
 static void guest_fault_report(void) {
     Cpu *c = t_cpu;
@@ -90,6 +114,12 @@ static void guest_fault_report(void) {
         fprintf(stderr, "    x%-2d %016llx  x%-2d %016llx  x%-2d %016llx  x%-2d %016llx\n", i, (unsigned long long)c->x[i],
                 i + 1, (unsigned long long)c->x[i + 1], i + 2, (unsigned long long)c->x[i + 2], i + 3,
                 (unsigned long long)c->x[i + 3]);
+    for (int i = 0; i < 29; i++) {
+        char r[8];
+        snprintf(r, sizeof r, "x%d", i);
+        print_text_at(r, c->x[i]);
+        if (c->x[i] >= 2) { snprintf(r, sizeof r, "x%d-2", i); print_text_at(r, c->x[i] - 2); }   // a cursor one wide char in
+    }
     fprintf(stderr, "    guest call chain (x30 / frame records):\n");
     runtime_trace_guest(c->x[29], c->x[30]);
 }

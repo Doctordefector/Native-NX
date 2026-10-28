@@ -85,6 +85,12 @@ static ClockSnapshot *snap(uint64_t a) { return (ClockSnapshot *)(uintptr_t)a; }
 HLE_FUNC("_ZN2nn4time10InitializeEv", time_initialize) { initialized = 1; pthread_once(&once, make_source); c->x[0] = 0; }
 HLE_FUNC("_ZN2nn4time8FinalizeEv", time_finalize) { initialized = 0; c->x[0] = 0; }
 HLE_FUNC("_ZN2nn4time13IsInitializedEv", time_is_initialized) { c->x[0] = (unsigned char)initialized; }
+/* [Pikmin 4] the engine asks for the device time zone during static init; the SDK's own version aborts without the
+   time service. Same location name as the snapshot ("UTC", see the TODO above). */
+HLE_FUNC("_ZN2nn4time21GetDeviceLocationNameEPNS0_12LocationNameE", time_location_name) {
+    char *out = (char *)(uintptr_t)c->x[0];
+    if (out) { memset(out, 0, 0x24); memcpy(out, "UTC", 3); }
+}
 HLE_FUNC("_ZN2nn4time23StandardUserSystemClock14GetCurrentTimeEPNS0_9PosixTimeE", time_user_now) {
     int64_t *out = (int64_t *)(uintptr_t)c->x[0];
     if (!out) { c->x[0] = R_INVALID; return; }
@@ -104,6 +110,31 @@ HLE_FUNC("_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditio
     if (!cal || !posix) { c->x[0] = R_INVALID; return; }
     fill_calendar(cal, info, *posix, 1);
     c->x[0] = 0;
+}
+/* [Pikmin 4] Unreal's FPlatformTime: LoadTimeZoneRule for the device location, then ToCalendarTime with that rule.
+   The rule is opaque to the game (0x4000 bytes); the host's local time zone stands for every rule. */
+HLE_FUNC("_ZN2nn4time16LoadTimeZoneRuleEPNS0_12TimeZoneRuleERKNS0_12LocationNameE", time_load_rule) {
+    void *rule = (void *)(uintptr_t)c->x[0];
+    if (!rule) { c->x[0] = R_INVALID; return; }
+    memset(rule, 0, 0x4000); memcpy(rule, "HOSTTZ", 6);
+    c->x[0] = 0;
+}
+HLE_FUNC("_ZN2nn4time14ToCalendarTimeEPNS0_12CalendarTimeEPNS0_22CalendarAdditionalInfoERKNS0_9PosixTimeERKNS0_12TimeZoneRuleE",
+         time_to_calendar_rule) {
+    CalendarTime *cal = (CalendarTime *)(uintptr_t)c->x[0];
+    CalendarAdditionalInfo *info = (CalendarAdditionalInfo *)(uintptr_t)c->x[1];
+    const int64_t *posix = (const int64_t *)(uintptr_t)c->x[2];
+    if (!cal || !posix) { c->x[0] = R_INVALID; return; }
+    fill_calendar(cal, info, *posix, 1);
+    c->x[0] = 0;
+}
+/* GetDayOfWeek(year, month, day) -> nn::time::DayOfWeek, 0 = Sunday (Sakamoto's method). */
+HLE_FUNC("_ZN2nn4time12GetDayOfWeekEiii", time_day_of_week) {
+    static const int t[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+    int y = (int)c->x[0], m = (int)c->x[1], d = (int)c->x[2];
+    if (m < 1 || m > 12) { c->x[0] = 0; return; }
+    y -= m < 3;
+    c->x[0] = (uint64_t)((y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7);
 }
 HLE_FUNC("_ZN2nn4time19ToCalendarTimeInUtcERKNS0_9PosixTimeE", time_to_calendar_utc) {   /* returns the 8-byte struct in x0 */
     const int64_t *posix = (const int64_t *)(uintptr_t)c->x[0];

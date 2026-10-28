@@ -661,6 +661,50 @@ static unsigned open_directory(uint64_t *out, const char *path, int mode) {
     pthread_mutex_unlock(&lock);
     runtime_fail("host directory handle table full");
 }
+/* [Pikmin 4] nn::fs calls TOTK does not make (SDK 10.4.8 / Unreal). Without these the SDK's own versions open fsp-srv. */
+static void set_allocator(uint64_t alloc, uint64_t release) { (void)alloc; (void)release; }   /* host allocates its own */
+static void enable_file_cache(uint64_t buf, uint64_t size) { (void)buf; (void)size; }       /* host has its own caching */
+static unsigned delete_directory(const char *path) {
+    char p[1100];
+    unsigned r = save_change_path(path, p, sizeof p);
+    if (r) return r;
+    return rmdir(p) ? errno_result() : 0;
+}
+static unsigned entry_count(int64_t *count, uint64_t h) {
+    if (h < DIR_BASE || h >= DIR_BASE + NDIRS || !count) return R_INVALID_ARGUMENT;
+    Dir *d = &dirs[h - DIR_BASE];
+    if (!d->dir) return R_INVALID_ARGUMENT;
+    DIR *again = opendir(d->path);   /* a second listing: the handle's own read position stays where it is */
+    if (!again) return errno_result();
+    int64_t n = 0;
+    struct dirent *e;
+    while ((e = readdir(again))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        char child[2048];
+        snprintf(child, sizeof child, "%s/%s", d->path, e->d_name);
+        struct stat st;
+        if (!stat(child, &st) && (d->mode & (S_ISDIR(st.st_mode) ? 1 : 2))) n++;
+    }
+    closedir(again);
+    *count = n;
+    return 0;
+}
+static unsigned ensure_save(const uint64_t *uid) { (void)uid; ready(); return 0; }   /* init() made save_root */
+static unsigned char save_exists_uid(const uint64_t *uid) { (void)uid; ready(); return 1; }
+static unsigned extend_save(const uint64_t *uid, int64_t size, int64_t journal) { (void)uid; (void)size; (void)journal; return 0; }
+static unsigned commit_save(const char *name) { return commit(name); }
+static unsigned mount_cache0(const char *name) {   /* the application's cache storage, index 0 */
+    ready();
+    char p[1100];
+    cache_dir(0, p, sizeof p);
+    if (!is_dir(p)) { unsigned r = create_cache(0, 0, 0); if (r) return r; }
+    return mount_cache(name, 0);
+}
+static unsigned aoc_cache_size(uint64_t *out, int index) { (void)index; if (!out) return R_INVALID_ARGUMENT; *out = 0x1000; return 0; }
+static unsigned mount_aoc(const char *name, int index, uint64_t cache, uint64_t size) {   /* no DLC on this host */
+    (void)name; (void)index; (void)cache; (void)size;
+    return R_TARGET_NOT_FOUND;
+}
 static unsigned read_directory(int64_t *count, DirectoryEntry *out, uint64_t h, int64_t max) {
     if (h < DIR_BASE || h >= DIR_BASE + NDIRS || !count || max < 0 || (!out && max)) return R_INVALID_ARGUMENT;
     Dir *d = &dirs[h - DIR_BASE];
@@ -728,3 +772,14 @@ HLE_NATIVE("_ZN2nn2fs20OpenCacheStorageListEPNS0_22CacheStorageListHandleE", ope
 HLE_NATIVE("_ZN2nn2fs20ReadCacheStorageListEPiPNS0_16CacheStorageInfoENS0_22CacheStorageListHandleEi", read_cache_list, 'w')
 HLE_NATIVE("_ZN2nn2fs21CloseCacheStorageListENS0_22CacheStorageListHandleE", close_cache_list, 'v')
 HLE_NATIVE("_ZN2nn2fs26SetPriorityOnCurrentThreadENS0_8PriorityE", set_priority, 'v')
+HLE_NATIVE("_ZN2nn2fs12SetAllocatorEPFPvmEPFvS1_mE", set_allocator, 'v')
+HLE_NATIVE("_ZN2nn2fs25EnableGlobalFileDataCacheEPvm", enable_file_cache, 'v')
+HLE_NATIVE("_ZN2nn2fs15DeleteDirectoryEPKc", delete_directory, 'w')
+HLE_NATIVE("_ZN2nn2fs22GetDirectoryEntryCountEPlNS0_15DirectoryHandleE", entry_count, 'w')
+HLE_NATIVE("_ZN2nn2fs14EnsureSaveDataERKNS_7account3UidE", ensure_save, 'w')
+HLE_NATIVE("_ZN2nn2fs18IsSaveDataExistingERKNS_7account3UidE", save_exists_uid, 'b')
+HLE_NATIVE("_ZN2nn2fs14ExtendSaveDataERKNS_7account3UidEll", extend_save, 'w')
+HLE_NATIVE("_ZN2nn2fs14CommitSaveDataEPKc", commit_save, 'w')
+HLE_NATIVE("_ZN2nn2fs17MountCacheStorageEPKc", mount_cache0, 'w')
+HLE_NATIVE("_ZN2nn2fs31QueryMountAddOnContentCacheSizeEPmi", aoc_cache_size, 'w')
+HLE_NATIVE("_ZN2nn2fs17MountAddOnContentEPKciPvm", mount_aoc, 'w')
