@@ -504,7 +504,7 @@ VkImageView vkb_view(vkb_image *im, const view_t *v, int attachment, int view_ty
         : target == NVN_TEXTURE_TARGET_CUBEMAP_ARRAY && !attachment ? VK_IMAGE_VIEW_TYPE_CUBE_ARRAY
         : nlay > 1 || target == NVN_TEXTURE_TARGET_2D_ARRAY || target == NVN_TEXTURE_TARGET_2D_MULTISAMPLE_ARRAY ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
         : VK_IMAGE_VIEW_TYPE_2D;
-    if (type == VK_IMAGE_VIEW_TYPE_3D && attachment) { type = VK_IMAGE_VIEW_TYPE_2D_ARRAY; nlay = im->depth; }
+    if (type == VK_IMAGE_VIEW_TYPE_3D && attachment == 1) { type = VK_IMAGE_VIEW_TYPE_2D_ARRAY; nlay = im->depth; }   // [Pikmin 4] render targets only: a storage image keeps its 3D view
     if (!attachment && view_type >= 0 && im->depth <= 1) {   // as the shader declares it (layer counts must fit the type)
         type = (VkImageViewType)view_type;
         if (((type == VK_IMAGE_VIEW_TYPE_CUBE || type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) && nlay < 6) || type == VK_IMAGE_VIEW_TYPE_3D)

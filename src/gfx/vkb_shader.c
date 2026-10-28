@@ -199,6 +199,23 @@ static size_t texel_buffers(uint32_t *w, size_t n) {
         w[cap_at] = (2u << 16) | 17; w[cap_at + 1] = 47;
         n += 2;
     }
+    // storage images without a format (Ryujinx leaves Unknown when the shader does not say): reads and writes need
+    // StorageImageReadWithoutFormat (55) / StorageImageWriteWithoutFormat (56) - the validation layer's spirv-val error
+    int unknown = 0, has55 = 0, has56 = 0;
+    for (size_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
+        if (!wc) break;
+        if (op == 17 && w[i + 1] == 55) has55 = 1;
+        if (op == 17 && w[i + 1] == 56) has56 = 1;
+        if (op == 25 && wc >= 9 && w[i + 7] == 2 && w[i + 8] == 0) unknown = 1;   // OpTypeImage Sampled 2, Format Unknown
+        i += wc;
+    }
+    for (int k = 0; unknown && cap_at && k < 2; k++) {
+        if (k ? has56 : has55) continue;
+        memmove(&w[cap_at + 2], &w[cap_at], (n - cap_at) * 4);
+        w[cap_at] = (2u << 16) | 17; w[cap_at + 1] = k ? 56 : 55;
+        n += 2;
+    }
     if (!nsi) return n;
     size_t o = 5;
     for (size_t i = 5; i < n;) {
@@ -218,6 +235,39 @@ static size_t texel_buffers(uint32_t *w, size_t n) {
         o += 2;
     }
     return o;
+}
+
+/* [Pikmin 4] spirv-val: "Vector access is out of bounds" - Ryujinx, translating a captured shader with the default bind
+   state, takes an unknown texture as 2D and reads component 2 (the depth) of the 2-component OpImageQuerySize[Lod]
+   result. The hardware's size query gives 0 there: the read becomes OpCopyObject of the integer constant 0, and the
+   instruction keeps its length (one OpNop word). Returns how many reads were rewritten. */
+static int fix_size_reads(uint32_t *w, size_t n) {
+    enum { MAXQ = 256, MAXV = 64 };
+    uint32_t vec[MAXV], vlen[MAXV], nv = 0, q[MAXQ], qlen[MAXQ], nq = 0, zero_t[8], zero_id[8], nz = 0;
+    for (size_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
+        if (!wc || i + wc > n) return 0;
+        if (op == 23 && wc == 4 && nv < MAXV) { vec[nv] = w[i + 1]; vlen[nv++] = w[i + 3]; }                    // OpTypeVector
+        if (op == 43 && wc == 4 && w[i + 3] == 0 && nz < 8) { zero_t[nz] = w[i + 1]; zero_id[nz++] = w[i + 2]; }   // OpConstant 0
+        if ((op == 103 || op == 104) && wc >= 4 && nq < MAXQ)                                                      // OpImageQuerySize[Lod]
+            for (uint32_t k = 0; k < nv; k++) if (vec[k] == w[i + 1]) { q[nq] = w[i + 2]; qlen[nq++] = vlen[k]; }
+        i += wc;
+    }
+    int fixed = 0;
+    for (size_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
+        if (op == 81 && wc == 5)   // OpCompositeExtract %type %result %composite index
+            for (uint32_t k = 0; k < nq; k++)
+                if (w[i + 3] == q[k] && w[i + 4] >= qlen[k])
+                    for (uint32_t z = 0; z < nz; z++)
+                        if (zero_t[z] == w[i + 1]) {
+                            w[i] = (4u << 16) | 83; w[i + 3] = zero_id[z]; w[i + 4] = (1u << 16) | 0;   // OpCopyObject; OpNop
+                            fixed++;
+                            break;
+                        }
+        i += wc;
+    }
+    return fixed;
 }
 
 static VkResult create_object(VkShaderStageFlagBits stage, const uint32_t *spv, size_t bytes, VkShaderEXT *obj) {
@@ -356,13 +406,14 @@ static int load(vkb_shader *s, const char *key, int nvn_stage) {
     s->frag_outputs = (uint32_t)json_top_int(j, "frag_out_map", 0);
     free(j);
     // rewrite Binding decorations (OpDecorate %id Binding n: opcode 71, decoration 33)
-    if (s->ntbuf || s->nstbuf) {   // [Pikmin 4] room for the capabilities texel_buffers may add
-        uint32_t *g = realloc(spv, nspv + 16);
+    if (s->ntbuf || s->nstbuf || s->nimg) {   // [Pikmin 4] room for the capabilities texel_buffers may add
+        uint32_t *g = realloc(spv, nspv + 32);
         if (!g) die("shader memory");
         spv = g;
     }
     size_t nw = drop_cull_distance(spv, nspv / 4);
-    if (s->ntbuf || s->nstbuf) nw = texel_buffers(spv, nw);
+    if (s->ntbuf || s->nstbuf || s->nimg) nw = texel_buffers(spv, nw);
+    if (fix_size_reads(spv, nw)) { static int said; if (said++ < 8) VLOG("shader %s: size query components past its vector read as 0", key); }
     nspv = nw * 4;
     for (size_t i = 5; i < nw;) {
         uint32_t op = spv[i] & 0xffff, wc = spv[i] >> 16;
@@ -377,6 +428,12 @@ static int load(vkb_shader *s, const char *key, int nvn_stage) {
         i += wc;
     }
     VkShaderStageFlagBits stage = nvn_stage == 0 ? VK_SHADER_STAGE_VERTEX_BIT : nvn_stage == 1 ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_COMPUTE_BIT;
+    if (getenv("TOTK_SPV_DUMP")) {   // [Pikmin 4] development: every module as loaded (bindings and fixes applied), for spirv-val
+        char dp[1024];
+        snprintf(dp, sizeof dp, "%s/%.16s.spv", getenv("TOTK_SPV_DUMP"), key);
+        FILE *f = fopen(dp, "wb");
+        if (f) { fwrite(spv, 1, nspv, f); fclose(f); }
+    }
     VkResult r = create_object(stage, spv, nspv, &s->obj);
     if (r == VK_SUCCESS) {   // input / output locations: vertex variants; fragment inputs no vertex shader writes (audit)
         s->in_mask = vkb_spv_input_mask(spv, nspv / 4);

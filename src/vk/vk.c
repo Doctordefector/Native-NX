@@ -17,9 +17,74 @@ static pthread_mutex_t queue_mu = PTHREAD_MUTEX_INITIALIZER;
 void vk_queue_lock(void) { pthread_mutex_lock(&queue_mu); }
 void vk_queue_unlock(void) { pthread_mutex_unlock(&queue_mu); }
 
+/* [Pikmin 4] TOTK_VK_CHECKPOINTS=1 (development): every buffer's device address range, live or destroyed, so a device
+   fault's address can be named (fault_report) */
+typedef struct { VkBuffer b; VkDeviceAddress lo, hi; int dead; } bufrec;
+static bufrec g_bufs[8192];
+static int g_nbufs;
+static pthread_mutex_t g_bufs_mu = PTHREAD_MUTEX_INITIALIZER;
+static PFN_vkBindBufferMemory real_bind;
+static PFN_vkDestroyBuffer real_destroy;
+static VkResult VKAPI_CALL map_bind(VkDevice d, VkBuffer b, VkDeviceMemory m, VkDeviceSize off) {
+    VkResult r = real_bind(d, b, m, off);
+    VkMemoryRequirements req;
+    vk.vkGetBufferMemoryRequirements(d, b, &req);
+    VkBufferDeviceAddressInfo ad = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = b};
+    VkDeviceAddress a = vk.vkGetBufferDeviceAddress(d, &ad);   // 0 for a buffer without the usage
+    pthread_mutex_lock(&g_bufs_mu);
+    if (a) g_bufs[g_nbufs++ % 8192] = (bufrec){b, a, a + req.size, 0};
+    pthread_mutex_unlock(&g_bufs_mu);
+    return r;
+}
+static void VKAPI_CALL map_destroy(VkDevice d, VkBuffer b, const VkAllocationCallbacks *al) {
+    pthread_mutex_lock(&g_bufs_mu);
+    int n = g_nbufs < 8192 ? g_nbufs : 8192;
+    for (int i = 0; i < n; i++) if (g_bufs[i].b == b && !g_bufs[i].dead) g_bufs[i].dead = 1;
+    pthread_mutex_unlock(&g_bufs_mu);
+    real_destroy(d, b, al);
+}
+static void name_address(VkDeviceAddress x) {
+    int n = g_nbufs < 8192 ? g_nbufs : 8192, hit = 0;
+    for (int i = 0; i < n; i++)
+        if (x >= g_bufs[i].lo && x < g_bufs[i].hi) {
+            LOG("    in buffer %p %#llx..%#llx (%s)", (void *)g_bufs[i].b, (unsigned long long)g_bufs[i].lo, (unsigned long long)g_bufs[i].hi,
+                g_bufs[i].dead ? "destroyed" : "live");
+            hit = 1;
+        }
+    if (!hit) {   // the nearest buffers around it
+        VkDeviceAddress below = 0, above = ~0ull;
+        for (int i = 0; i < n; i++) { if (g_bufs[i].hi <= x && g_bufs[i].hi > below) below = g_bufs[i].hi; if (g_bufs[i].lo > x && g_bufs[i].lo < above) above = g_bufs[i].lo; }
+        LOG("    in no buffer this run made (nearest end below %#llx, start above %#llx; %d buffers known)", (unsigned long long)below, (unsigned long long)above, n);
+    }
+}
+
+/* [Pikmin 4] VK_EXT_device_fault: what the driver reports about a lost device - the faulting addresses, their kind
+   (read / write / execute / instruction pointer), and vendor fault codes */
+static void fault_report(void) {
+    static int done;
+    if (!vkc.has_fault || !vk.vkGetDeviceFaultInfoEXT || done++) return;
+    VkDeviceFaultCountsEXT c = {VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
+    if (vk.vkGetDeviceFaultInfoEXT(vkc.device, &c, NULL) != VK_SUCCESS && !c.addressInfoCount && !c.vendorInfoCount) { LOG("device fault: no information"); return; }
+    VkDeviceFaultAddressInfoEXT a[32]; VkDeviceFaultVendorInfoEXT v[32];
+    if (c.addressInfoCount > 32) c.addressInfoCount = 32;
+    if (c.vendorInfoCount > 32) c.vendorInfoCount = 32;
+    c.vendorBinarySize = 0;
+    VkDeviceFaultInfoEXT fi = {VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT, .pAddressInfos = a, .pVendorInfos = v};
+    VkResult r = vk.vkGetDeviceFaultInfoEXT(vkc.device, &c, &fi);
+    LOG("device fault (%d): %s; %u addresses, %u vendor records", (int)r, fi.description, c.addressInfoCount, c.vendorInfoCount);
+    static const char *kind[] = {"none", "read invalid", "write invalid", "execute invalid", "instruction pointer unknown", "instruction pointer invalid", "instruction pointer fault"};
+    for (uint32_t i = 0; i < c.addressInfoCount; i++)
+        { LOG("  address %#llx (precision %#llx): %s", (unsigned long long)a[i].reportedAddress, (unsigned long long)a[i].addressPrecision,
+              a[i].addressType < 7 ? kind[a[i].addressType] : "?");
+          if (a[i].addressType >= 1 && a[i].addressType <= 3) name_address(a[i].reportedAddress); }
+    for (uint32_t i = 0; i < c.vendorInfoCount; i++)
+        LOG("  vendor: %s (code %#llx, data %#llx)", v[i].description, (unsigned long long)v[i].vendorFaultCode, (unsigned long long)v[i].vendorFaultData);
+}
+
 int vk_check(VkResult r, const char *what) {
     if (r == VK_SUCCESS) return 1;
     LOG("%s failed (%d)", what, (int)r);
+    if (r == VK_ERROR_DEVICE_LOST) fault_report();
     return 0;
 }
 
@@ -145,6 +210,7 @@ static VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT fplr = {VK_STRUCT
 static VkPhysicalDeviceShaderObjectFeaturesEXT fso = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_OBJECT_FEATURES_EXT};
 static VkPhysicalDeviceFragmentShaderInterlockFeaturesEXT ffsi = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT};
 static VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT ffl = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT};
+static VkPhysicalDeviceFaultFeaturesEXT ffault = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};   // [Pikmin 4]
 static VkPhysicalDeviceAttachmentFeedbackLoopDynamicStateFeaturesEXT ffld = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_FEATURES_EXT};
 static int has_fl, has_fld;
 static VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR flr = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES_KHR};
@@ -184,10 +250,11 @@ static int create_device(void) {
         {VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME, &flr, &has_lr},
         // development (TOTK_VK_CHECKPOINTS=1): the markers a lost device reached
         {VK_NV_DEVICE_DIAGNOSTIC_CHECKPOINTS_EXTENSION_NAME, NULL, &vkc.has_checkpoints},
+        {VK_EXT_DEVICE_FAULT_EXTENSION_NAME, &ffault, &vkc.has_fault},
     };
     for (unsigned i = 0; i < sizeof want / sizeof *want; i++) {
         if (!strcmp(want[i].name, VK_KHR_SWAPCHAIN_EXTENSION_NAME) && !vkc.surface) continue;
-        if (want[i].flag == &vkc.has_checkpoints && !getenv("TOTK_VK_CHECKPOINTS")) continue;
+        if ((want[i].flag == &vkc.has_checkpoints || want[i].flag == &vkc.has_fault) && !getenv("TOTK_VK_CHECKPOINTS")) continue;
         if (!ext_in(&ex, want[i].name)) { LOG("extension %s not available", want[i].name); continue; }
         names[nnames++] = want[i].name;
         if (want[i].flag) *want[i].flag = 1;
@@ -225,6 +292,10 @@ static int create_device(void) {
 #define LOAD(f) vk.f = (PFN_##f)vk.vkGetDeviceProcAddr(vkc.device, #f);
     VK_FN_DEVICE(LOAD)
 #undef LOAD
+    if (vkc.has_fault) {   // [Pikmin 4] the buffer address map for fault reports
+        real_bind = vk.vkBindBufferMemory; vk.vkBindBufferMemory = map_bind;
+        real_destroy = vk.vkDestroyBuffer; vk.vkDestroyBuffer = map_destroy;
+    }
     vk.vkGetDeviceQueue(vkc.device, vkc.family, 0, &vkc.queue);
     LOG("device: %u extensions; descriptor buffer %d, pipeline library %d, dynamic state 3 %d, vertex input %d, "
         "timeline semaphores %d, host pointer alignment %#llx", nnames, vkc.has_descriptor_buffer, vkc.has_gpl,

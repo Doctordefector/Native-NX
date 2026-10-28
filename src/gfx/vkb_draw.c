@@ -35,7 +35,7 @@ static uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags want) {
 
 static int chunk_new(chunk_t *c, VkDeviceSize size) {
     VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
-        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT |
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT |
                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT};
     if (!vk_check(vk.vkCreateBuffer(vkc.device, &bi, NULL, &c->buf), "upload buffer")) return 0;
     VkMemoryRequirements req;
@@ -359,14 +359,16 @@ static VkSampler sampler(int id) {
 }
 
 // A 1x1 black image for unbound texture slots, one per view type. Created (cleared) outside a pass: dummy_init.
-static VkImage g_dummy;
+static VkImage g_dummy, g_dummy3d;   // [Pikmin 4] g_dummy3d: 1x1x1 3D (a 2D image cannot have a 3D view)
 static void dummy_init(void) {
-    VkImage *imgp = &g_dummy;
-    if (*imgp) return;
+    for (int d3 = 0; d3 < 2; d3++) {
+    VkImage *imgp = d3 ? &g_dummy3d : &g_dummy;
+    if (*imgp) continue;
     {
         VkImage img;
-        VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,
-            .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {1, 1, 1}, .mipLevels = 1, .arrayLayers = 6,
+        VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = d3 ? 0 : VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,
+            .imageType = d3 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {1, 1, 1}, .mipLevels = 1,
+            .arrayLayers = d3 ? 1 : 6,
             .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
             .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
         vk.vkCreateImage(vkc.device, &ci, NULL, &img);
@@ -381,16 +383,17 @@ static void dummy_init(void) {
         VkImageMemoryBarrier2 b = {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
             .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
             .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-            .image = img, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6}};
+            .image = img, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, d3 ? 1u : 6u}};
         VkDependencyInfo di = {VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &b};
         vk.vkCmdPipelineBarrier2(cb, &di);
         VkClearColorValue z = {{0, 0, 0, 0}};
-        VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6};
+        VkImageSubresourceRange rg = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, d3 ? 1u : 6u};
         vk.vkCmdClearColorImage(cb, img, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &rg);
         b.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT; b.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
         b.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
         vk.vkCmdPipelineBarrier2(cb, &di);
         *imgp = img;
+    }
     }
 }
 static VkImageView g_dummy_views[8];   // made before threads record (vkb_draw_mt_init)
@@ -398,7 +401,7 @@ static VkImageView dummy_view(VkImageViewType type) {
     VkImageView *views = g_dummy_views;
     VkImage img = g_dummy;
     if (type > VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) type = VK_IMAGE_VIEW_TYPE_2D;
-    if (type == VK_IMAGE_VIEW_TYPE_3D) type = VK_IMAGE_VIEW_TYPE_2D_ARRAY;   // [temporary] a 2D image cannot have a 3D view
+    if (type == VK_IMAGE_VIEW_TYPE_3D) img = g_dummy3d;   // [Pikmin 4] a real 3D view: a 2D-array view in a 3D binding loses the device
     if (!views[type]) {
         uint32_t layers = type == VK_IMAGE_VIEW_TYPE_CUBE || type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY ? 6 : 1;
         VkImageViewCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img, .viewType = type, .format = VK_FORMAT_R8G8B8A8_UNORM,
@@ -487,7 +490,7 @@ static void fixed_buffers(void) {
     for (int k = 0; k < 2; k++) {
         VkBuffer *b = k ? &g_support : &g_zero;
         VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 65536,
-                                 .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                 .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                                           VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT};
         vk.vkCreateBuffer(vkc.device, &bi, NULL, b);
         VkMemoryRequirements req;
@@ -535,7 +538,7 @@ static int mirror_alloc(uint64_t addr, VkDeviceSize n, VkBuffer *buf, VkDeviceSi
     if (sl < 0) return 0;
     if (!g_mpool[sl].buf) {
         VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = MIRROR_POOL,
-            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                      VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT};
         if (!vk_check(vk.vkCreateBuffer(vkc.device, &bi, NULL, &g_mpool[sl].buf), "mirror buffer")) return 0;
@@ -687,7 +690,8 @@ typedef struct {
     VkWriteDescriptorSet w[160];
     VkDescriptorBufferInfo bi[160];
     VkDescriptorImageInfo ii[160];
-    VkFormat tf[160];   // [Pikmin 4] uniform texel buffers: the format, reached through the write's pTexelBufferView
+    VkFormat tf[160];   // [Pikmin 4] uniform texel buffers: the format, reached through the write's pTexelBufferView (descriptor buffers)
+    VkBufferView bv[160];   // [Pikmin 4] ... or the view (descriptor sets)
     int n;
 } writes_t;
 
@@ -720,10 +724,36 @@ static void put_buf(writes_t *W, VkDescriptorSet set, uint32_t binding, VkDescri
 // [Pikmin 4] a buffer texture: its range and format (descriptor buffers only: a descriptor set would need a VkBufferView,
 // so with descriptor sets the binding stays unwritten - partially bound)
 static void put_tbuf(writes_t *W, VkDescriptorSet set, uint32_t binding, VkDescriptorType type, VkDescriptorBufferInfo info, VkFormat f, int stage) {
-    /* [temporary] off unless TOTK_TBUF=1: written texel buffers still lose the device (under investigation); TOTK_TBUF=gfx
-       writes them for graphics only */
-    static int off = -1; if (off < 0) { const char *e = getenv("TOTK_TBUF"); off = !e ? 1 : !strcmp(e, "gfx") ? 2 : 0; }
-    if (!vkb_db_on() || (off && (off == 1 || stage == 5))) return;
+    // development: TOTK_TBUF=0 leaves them unwritten, gfx / nostbuf / onlystbuf write some of them (bisecting)
+    static int off = -1; if (off < 0) { const char *e = getenv("TOTK_TBUF"); off = !e ? 0 : !strcmp(e, "0") ? 1 : !strcmp(e, "gfx") ? 2 : !strcmp(e, "nostbuf") ? 3 : !strcmp(e, "onlystbuf") ? 4 : 0; }
+    if (off == 1 || (off == 2 && stage == 5) || (off == 3 && type == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) ||
+        (off == 4 && type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER)) return;
+    if (!vkb_db_on()) {   // descriptor sets: a VkBufferView, made once per (buffer, offset, range, format) and kept
+        enum { NBV = 1 << 14 };
+        static struct { VkBuffer b; VkDeviceSize off, range; VkFormat f; VkBufferView v; } *cache;
+        static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+        pthread_mutex_lock(&mu);
+        if (!cache && !(cache = calloc(NBV, sizeof *cache))) die("buffer views");
+        uint32_t h = (uint32_t)((((uint64_t)(uintptr_t)info.buffer ^ info.offset * 31 ^ info.range * 131 ^ (uint64_t)f * 7919) * 0x9E3779B97F4A7C15ull) >> 50);
+        VkBufferView view = VK_NULL_HANDLE;
+        for (uint32_t k = 0; k < 64; k++) {
+            uint32_t j = (h + k) & (NBV - 1);
+            if (cache[j].v && cache[j].b == info.buffer && cache[j].off == info.offset && cache[j].range == info.range && cache[j].f == f) { view = cache[j].v; break; }
+            if (!cache[j].v) {
+                VkBufferViewCreateInfo ci = {VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO, .buffer = info.buffer, .format = f, .offset = info.offset, .range = info.range};
+                if (vk.vkCreateBufferView(vkc.device, &ci, NULL, &cache[j].v) == VK_SUCCESS) { cache[j].b = info.buffer; cache[j].off = info.offset; cache[j].range = info.range; cache[j].f = f; view = cache[j].v; }
+                else cache[j].v = VK_NULL_HANDLE;
+                break;
+            }
+        }
+        pthread_mutex_unlock(&mu);
+        if (!view) return;
+        W->bv[W->n] = view;
+        W->w[W->n] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = binding, .descriptorCount = 1,
+                                             .descriptorType = type, .pTexelBufferView = &W->bv[W->n]};
+        W->n++;
+        return;
+    }
     static int zero = -1; if (zero < 0) zero = getenv("TOTK_TBUF_ZERO") ? atoi(getenv("TOTK_TBUF_ZERO")) : 0;   // development: bisecting
     if (zero) { info = (VkDescriptorBufferInfo){g_zero, 0, 65536}; f = zero == 2 ? VK_FORMAT_R32_UINT : VK_FORMAT_R32G32B32A32_SFLOAT; }
     W->bi[W->n] = info;
@@ -953,9 +983,11 @@ static void write_stage(writes_t *W, VkDescriptorSet set, const vkb_shader *sh, 
     for (int i = 0; i < sh->nimg; i++) {
         const view_t *v = NULL;
         vkb_image *im = handle_image(S.img[stage][sh->img[i].slot], &v);
-        VkImageView view = im && vkb_layout_is(im, VK_IMAGE_LAYOUT_GENERAL) ? vkb_view(im, v, 2, -1) : VK_NULL_HANDLE;
+        VkImageViewType ivt = view_type_of(sh->img[i].type);   // [Pikmin 4] as the shader declares it
+        int ifits = im && (ivt == VK_IMAGE_VIEW_TYPE_3D) == (im->depth > 1);
+        VkImageView view = im && ifits && vkb_layout_is(im, VK_IMAGE_LAYOUT_GENERAL) ? vkb_view(im, v, 2, -1) : VK_NULL_HANDLE;
         if (!view) vkb_audit(A_IMG_MISSING, sh->key);
-        VkDescriptorImageInfo info = {VK_NULL_HANDLE, view ? view : dummy_view(VK_IMAGE_VIEW_TYPE_2D), VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo info = {VK_NULL_HANDLE, view ? view : dummy_view(ivt), VK_IMAGE_LAYOUT_GENERAL};
         put_img(W, set, base + VKB_B_IMG + (uint32_t)i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, info);
     }
     for (int i = 0; i < sh->ntbuf; i++) {   // [Pikmin 4] buffer textures: the registered texture's storage as a texel buffer
@@ -975,8 +1007,11 @@ static void write_stage(writes_t *W, VkDescriptorSet set, const vkb_shader *sh, 
             bi = (VkDescriptorBufferInfo){g_zero, 0, 256};
             f = VK_FORMAT_R32G32B32A32_SFLOAT;
         }
-        { static _Atomic int said; if (said++ < 12) VLOG("[tbuf] shader %.12s: nvn format %#x -> vk %d, range %llu, descriptor %zu bytes (robust %zu)", sh->key ? sh->key : "?",
-              bi.buffer == g_zero ? 0 : t.d.format, (int)f, (unsigned long long)bi.range, (size_t)vkc.db.uniformTexelBufferDescriptorSize, (size_t)vkc.db.robustUniformTexelBufferDescriptorSize); }
+        { static _Atomic int said; if (sh->key && !strncmp(sh->key, "2f0b", 4) && said++ < 60) {   // development: what the shader reads (compare with a device fault)
+            VkBufferDeviceAddressInfo ad = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = bi.buffer};
+            VkDeviceAddress da = vk.vkGetBufferDeviceAddress(vkc.device, &ad);
+            VLOG("[tbuf] shader %.12s slot %d: guest %p fmt %#x %u texels -> vk %d device %#llx+%#llx%s", sh->key, i, (void *)t.mem, t.d.format, (unsigned)t.d.width,
+                 (int)f, (unsigned long long)(da + bi.offset), (unsigned long long)bi.range, bi.buffer == g_zero ? " (zeros)" : ""); } }
         put_tbuf(W, set, base + VKB_B_TBUF + (uint32_t)i, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, bi, f, stage);
     }
     for (int i = 0; i < sh->nstbuf; i++) {   // [Pikmin 4] buffer images: written in place (no copy: the writes must land)
@@ -998,6 +1033,11 @@ static void write_stage(writes_t *W, VkDescriptorSet set, const vkb_shader *sh, 
             bi = (VkDescriptorBufferInfo){rb, ro, 4096};
             f = VK_FORMAT_R32_UINT;
         }
+        { static _Atomic int said; if (said++ < 24) {   // development: where the writes go (compare with a device fault's address)
+            VkBufferDeviceAddressInfo ad = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = bi.buffer};
+            VkDeviceAddress da = vk.vkGetBufferDeviceAddress(vkc.device, &ad);
+            VLOG("[stbuf] shader %.12s image %d: guest %p, %u texels, vk format %d -> device %#llx+%#llx (buffer base %#llx)", sh->key ? sh->key : "?", i,
+                 (void *)t.mem, (unsigned)t.d.width, (int)f, (unsigned long long)(da + bi.offset), (unsigned long long)bi.range, (unsigned long long)da); } }
         put_tbuf(W, set, base + VKB_B_STBUF + (uint32_t)i, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, bi, f, stage);
     }
 }
@@ -1019,6 +1059,7 @@ static VkDescriptorSet resolve_set(writes_t *W, int compute) {
     for (int i = 0; i < W->n; i++) {
         const VkWriteDescriptorSet *w = &W->w[i];
         hmix(&h1, &h2, (uint64_t)w->dstBinding << 32 | (uint32_t)w->descriptorType);
+        if (!w->pBufferInfo && !w->pImageInfo) { hmix(&h1, &h2, (uint64_t)(uintptr_t)*w->pTexelBufferView); continue; }
         if (w->pBufferInfo) {
             hmix(&h1, &h2, (uint64_t)(uintptr_t)w->pBufferInfo->buffer);
             hmix(&h1, &h2, w->pBufferInfo->offset);
@@ -1648,7 +1689,7 @@ void vkb_draw_mt_init(void) {
     big_init();
     fixed_buffers();
     if (!g_dummy) dummy_init();
-    static const VkImageViewType types[] = {VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_IMAGE_VIEW_TYPE_CUBE, VK_IMAGE_VIEW_TYPE_CUBE_ARRAY};
+    static const VkImageViewType types[] = {VK_IMAGE_VIEW_TYPE_2D, VK_IMAGE_VIEW_TYPE_2D_ARRAY, VK_IMAGE_VIEW_TYPE_CUBE, VK_IMAGE_VIEW_TYPE_CUBE_ARRAY, VK_IMAGE_VIEW_TYPE_3D};
     for (unsigned t = 0; t < sizeof types / sizeof *types; t++) dummy_view(types[t]);   // (1D ones: as before, on first use)
     sampler(-1);
 }
@@ -1713,6 +1754,8 @@ void vkb_draw(const uint8_t *a, int indexed) {
         return;
     }
     if (skip_listed()) return;
+    { static const char *nr; static int init; if (!init) { nr = getenv("TOTK_VK_NORASTER"); init = 1; }   // development: these shaders' draws without rasterization
+      for (const char *p = nr; p && *p;) { size_t k = strcspn(p, ","); for (int st = 0; st < 2; st++) if (k && S.sh[st] && S.sh[st]->key && !strncmp(S.sh[st]->key, p, k)) S.raster_discard = 1; p += k + (p[k] == ','); } }
     int ok;
     VkPrimitiveTopology topo = topology(indexed ? di->prim : dr->prim, &ok);
     if (!ok) {
@@ -1876,6 +1919,8 @@ void vkb_dispatch(const uint8_t *a) {
     }
     vkb_audit_draw_begin();
     if (!resolve_program() || !S.sh[5]) { vkb_cnt_add(g_skipped[0], 1); vkb_audit(S.bad_key ? A_SHADER_UNSUPPORTED : A_DRAW_NO_PROGRAM, S.bad_key); return; }
+    { static const char *skip; static int init; if (!init) { skip = getenv("TOTK_VK_SKIP"); init = 1; }   // [Pikmin 4] TOTK_VK_SKIP: dispatches too
+      for (const char *p = skip; p && *p;) { size_t k = strcspn(p, ","); if (k && S.sh[5]->key && !strncmp(S.sh[5]->key, p, k)) return; p += k + (p[k] == ','); } }
     vkb_pass_end_r(PE_DISPATCH);
     dummy_init();
     const vkb_shader *cs = S.sh[5];

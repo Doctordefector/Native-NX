@@ -21,8 +21,11 @@
 int vkb_db_on(void) {
     static int v = -1;
     if (v < 0) {
-        const char *e = getenv("TOTK_VK_DESCRIPTOR_SETS");
-        v = vkc.has_descriptor_buffer && !(e && *e && *e != '0');
+        /* [Pikmin 4] descriptor sets by default: texel buffer descriptors written into descriptor buffers lose the device on
+           this NVIDIA driver (VK_EXT_device_fault: invalid writes at addresses no buffer has), the same draws with
+           VkBufferViews in descriptor sets run clean (2026-10-28). TOTK_VK_DESCRIPTOR_BUFFERS=1 brings them back */
+        const char *e = getenv("TOTK_VK_DESCRIPTOR_BUFFERS");
+        v = vkc.has_descriptor_buffer && e && *e && *e != '0';
         VLOG("descriptors: %s", v ? "descriptor buffers" : "descriptor sets");
     }
     return v;
@@ -107,7 +110,16 @@ static VkDeviceAddress buffer_address(VkBuffer b, uint64_t rec) {
     if (!g_addr && !(g_addr = calloc(4096, sizeof *g_addr))) die("buffer addresses");
     uint32_t h = (uint32_t)(((uint64_t)(uintptr_t)b * 0x9e3779b97f4a7c15ull) >> 52);
     for (uint32_t k = h;; k = (k + 1) & 4095) {
-        if (g_addr[k].rec == rec && g_addr[k].buf == b) return g_addr[k].addr;
+        if (g_addr[k].rec == rec && g_addr[k].buf == b) {
+            if (vkc.has_checkpoints) {   // [Pikmin 4] development: a cached address that is no longer the buffer's (a handle reused after a pool was deleted)
+                VkBufferDeviceAddressInfo ad = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = b};
+                VkDeviceAddress now = vk.vkGetBufferDeviceAddress(vkc.device, &ad);
+                static int said;
+                if (now != g_addr[k].addr && said++ < 16) VLOG("[stale] buffer %p: cached device address %#llx, now %#llx (rec %llu)", (void *)b,
+                                                             (unsigned long long)g_addr[k].addr, (unsigned long long)now, (unsigned long long)rec);
+            }
+            return g_addr[k].addr;
+        }
         if (g_addr[k].rec != rec) {
             VkBufferDeviceAddressInfo ad = {VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO, .buffer = b};
             g_addr[k].rec = rec; g_addr[k].buf = b; g_addr[k].addr = vk.vkGetBufferDeviceAddress(vkc.device, &ad);
