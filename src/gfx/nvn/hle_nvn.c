@@ -1090,6 +1090,18 @@ NVN(nvnCommandBufferUpdateUniformBuffer, void, NVNcommandBuffer *c, NVNbufferAdd
     uint64_t dst = buf + off, nn = n; memcpy(p + 8, &dst, 8); memcpy(p + 16, &nn, 8); memcpy(p + 24, data, n);
 }
 
+/* [Pikmin 4] ClearBuffer (fill with a 32-bit value) as in-stream buffer writes: the same ordering as the console's GPU
+   clear. TODO(port): an OP_FILL_BUFFER replayed with vkCmdFillBuffer instead of n bytes of command memory. */
+NVN(nvnCommandBufferClearBuffer, void, NVNcommandBuffer *c, NVNbufferAddress buf, size_t n, uint32_t value) {
+    enum { CHUNK = 0x10000 };
+    static __thread uint32_t fill[CHUNK / 4];   /* per recording thread */
+    static __thread uint32_t filled_with; static __thread int filled;
+    if (!filled || filled_with != value) { for (unsigned i = 0; i < CHUNK / 4; i++) fill[i] = value; filled_with = value; filled = 1; }
+    for (size_t off = 0; off < n; off += CHUNK) {
+        size_t k = n - off < CHUNK ? n - off : CHUNK;
+        h_nvnCommandBufferUpdateUniformBuffer(c, buf, n, (ptrdiff_t)off, k, fill);
+    }
+}
 // ---------- 渲染命令：参数按 nvn_obj.h 的载荷格式录进命令内存，回放见 nvn_mtl.m ----------
 // ---------- Render commands: parameters are recorded into command memory in the payload format of nvn_obj.h; for replay see nvn_mtl.m ----------
 static void *rec(NVNcommandBuffer *c, uint32_t op, size_t payload) {
@@ -1599,6 +1611,8 @@ static void bindprog_log(const prog_t *o, int stages) {
     LOG("%s", b);
 }
 NVN(nvnCommandBufferBindProgram, void, NVNcommandBuffer *c, const NVNprogram *p, int stages) {
+    { static _Atomic uint64_t n, nul; static _Atomic int said; n++; if (!p) nul++;   /* [Pikmin 4] diagnostic */
+      if ((n == 50 || n == 2000 || n == 20000) && atomic_fetch_add(&said, 1) < 3) LOG("[diag] BindProgram calls %llu, null %llu, last mask %#x nstage %u", (unsigned long long)n, (unsigned long long)nul, stages, p ? ((const prog_t *)p)->nstage : 0u); }
     *REC(c, OP_BIND_PROGRAM, p_bind_program) = (p_bind_program){(const prog_t *)p, stages};
     bindprog_log((const prog_t *)p, stages);
 }
@@ -2865,4 +2879,24 @@ NVN(nvnQueuePresentTexture, void, NVNqueue *q, NVNwindow *w, int idx) {
     if (f >= 8 && slow_on()) slow_emit(f - 8);
     prev_out = now_ns();
     totk_tl(TL_PRES_OUT, 0, 0);
+}
+
+/* [Pikmin 4] host access for the movie decoder's native-texture mode (src/host/movie_host.c): the client's movie::Buffer
+   points at an NVNtexture; the host writes each RGBA frame into it as WriteTexels does (the replay layer uploads the
+   written pages) and signals the buffer's NVNsync, where the SDK's consumer would draw on the GPU and fence. */
+int nvn_host_texture_info(const void *t, int *w, int *h) {
+    const tex_t *x = CTX(t);
+    if (!x || x->magic != MAGIC('T', 'E', 'X', 0)) return -1;
+    if (w) *w = (int)x->d.width;
+    if (h) *h = (int)x->d.height;
+    return (int)x->d.format;
+}
+void nvn_host_write_texture(const void *t, const void *rgba, int w, int h) {
+    NVNcopyRegion r = {0};
+    r.width = w; r.height = h; r.depth = 1;
+    write_texels(CTX(t), NULL, &r, rgba, (ptrdiff_t)w * 4, 0);
+}
+void nvn_host_signal_sync(void *s) {
+    sync_t *o = s;
+    if (o && o->magic == MAGIC('S', 'Y', 'N', 'C')) { o->fence = 0; o->fenced = 1; }   /* fence 0: already reached */
 }

@@ -36,7 +36,7 @@
 #include <vpx/vpx_decoder.h>
 
 enum { IN_BUFS = 4, IN_CAP = 2 << 20, OUT_BUFS = 8, MAX_MOVIES = 16 };
-enum { TYPE_VP9 = 3, MODE_BUFFER = 1, FORMAT_NV12 = 4, FLAG_EOS = 4 };
+enum { TYPE_VP9 = 3, MODE_BUFFER = 1, MODE_TEXTURE = 2, FORMAT_ABGR = 3, FORMAT_NV12 = 4, FLAG_EOS = 4 };   /* [Pikmin 4] texture mode */
 enum { ST_OK = 0, ST_ERROR = 0x1000, ST_NULL = 0x100b, ST_NOT_READY = 0x100c, ST_NO_OUTPUT = 0x100e, ST_NO_INPUT = 0x1011,
        ST_UNSUPPORTED = 0x2001, ST_NOT_CONFIGURED = 0x2002 };
 enum { EV_INPUT, EV_OUTPUT, EV_FORMAT, EV_ERROR };
@@ -50,6 +50,7 @@ typedef struct {
     void *signal_event, *buf_set_range, *buf_set_data, *buf_base, *buf_capacity;
     void *md_find_int32, *md_find_string, *md_set_int32, *md_set_rect, *md_set_string;
     void *vptr;                           /* vtable for movie::Decoder + 0x10: what the constructor stores at +0 */
+    void *buf_nvn_sync;                   /* [Pikmin 4] movie::Buffer::GetNvnSync (texture mode), when the SDK has it */
     void *orig[MOVIE_ENTRIES];
 } MovieGuest;
 
@@ -58,6 +59,7 @@ typedef struct { int index, offset, size; int64_t time; unsigned flags; } Pendin
 typedef struct {
     void *guest;                         /* the movie::Decoder object */
     int format, configured, started, w, h, eos_in, format_sent, last_error;
+    int mode; uint8_t *rgba;             /* [Pikmin 4] MODE_TEXTURE: frames go to the client's NVN texture as RGBA */
     void **events;                       /* DecoderEvents: EventType* per EV_* */
     vpx_codec_ctx_t vpx; int vpx_live;
     uint8_t *in[IN_BUFS]; int in_free[IN_BUFS], nin_free;
@@ -140,6 +142,7 @@ static void guest_init(void) {
         need_symbol(&G.md_set_rect, "_ZN5movie9MediaData7SetRectEPKciiii");
         need_symbol(&G.md_set_string, "_ZN5movie9MediaData9SetStringEPKcS2_");
         void *vt; need_symbol(&vt, "_ZTVN5movie7DecoderE"); G.vptr = (uint8_t *)vt + 0x10;
+        G.buf_nvn_sync = (void *)(uintptr_t)runtime_symbol("_ZNK5movie6Buffer10GetNvnSyncEv");   /* [Pikmin 4] optional */
         for (int i = 0; i < MOVIE_ENTRIES; i++) need_symbol(&G.orig[i], NAMES[i]);
         g_ready = 1;
     }
@@ -273,18 +276,18 @@ static int host_off(void) { static int off = -1; if (off < 0) { const char *e = 
 /* ---- entries ---- */
 static void h_ctor(void *obj, int type, int format, int mode, int priority) {
     if (!g_ready) guest_init();
-    if (host_off() || type != TYPE_VP9 || mode != MODE_BUFFER) {
-        MLOG("decoder type %d mode %d format %d: left to the library (only VP9 in buffer mode runs on the host)", type, mode, format);
+    if (host_off() || type != TYPE_VP9 || (mode != MODE_BUFFER && mode != MODE_TEXTURE)) {
+        MLOG("decoder type %d mode %d format %d: left to the library (only VP9 in buffer or texture mode runs on the host)", type, mode, format);
         orig(MOVIE_CTOR, 5, (uint64_t[]){U(obj), (uint64_t)type, (uint64_t)format, (uint64_t)mode, (uint64_t)priority}); return;
     }
     Movie *m = calloc(1, sizeof *m); if (!m) runtime_fail("movie decoder allocation");
-    m->guest = obj; m->format = format; pthread_mutex_init(&m->mu, NULL);
+    m->guest = obj; m->format = format; m->mode = mode; pthread_mutex_init(&m->mu, NULL);
     pthread_mutex_lock(&g_lock); int i = 0;
     while (i < MAX_MOVIES && g_movies[i] && g_movies[i]->guest != obj) i++;
     if (i == MAX_MOVIES) runtime_fail("movie decoder table full");
     Movie *old = g_movies[i];
     g_movies[i] = m; pthread_mutex_unlock(&g_lock);
-    if (old) { MLOG("decoder object %p reused without destruction", obj); release_codec(old); free(old); }
+    if (old) { MLOG("decoder object %p reused without destruction", obj); release_codec(old); free(old->rgba); free(old); }
     ((void **)obj)[0] = G.vptr; ((void **)obj)[1] = m;
     MLOG("VP9 decoder %p on the host (libvpx %s), output format %d", obj, vpx_codec_version_str(), format);
 }
@@ -295,7 +298,7 @@ static void destroy(void *obj) {
     pthread_mutex_unlock(&g_lock);
     if (!m) return;
     MLOG("decoder %p destroyed after %llu frames", obj, (unsigned long long)m->frames);
-    release_codec(m); pthread_mutex_destroy(&m->mu); free(m);
+    release_codec(m); pthread_mutex_destroy(&m->mu); free(m->rgba); free(m);
     ((void **)obj)[0] = G.vptr; ((void **)obj)[1] = NULL;   /* what the library's destructor leaves (no DecoderImpl) */
 }
 static void h_d2(void *obj) { if (!find(obj)) { orig(MOVIE_D2, 1, (uint64_t[]){U(obj)}); return; } destroy(obj); }
@@ -305,7 +308,7 @@ static void h_d0(void *obj) { if (find(obj)) destroy(obj); orig(MOVIE_D0, 1, (ui
 static int h_configure(void *obj, void *format) {
     Movie *m = find(obj); if (!m) return (int)orig(MOVIE_CONFIGURE, 2, (uint64_t[]){U(obj), U(format)});
     if (!format) return ST_NULL;
-    if (m->format != FORMAT_NV12) { MLOG("output format %d not implemented on the host (NV12 = 4 only)", m->format); return ST_UNSUPPORTED; }
+    if (m->format != FORMAT_NV12 && !(m->mode == MODE_TEXTURE && m->format == FORMAT_ABGR)) { MLOG("output format %d not implemented on the host (NV12 = 4 only)", m->format); return ST_UNSUPPORTED; }
     const char *mime = NULL; int w = 0, h = 0;
     md_find_string(format, "mime", &mime); md_find_int32(format, "width", &w); md_find_int32(format, "height", &h);
     if (!mime || strcmp(mime, "video/x-vnd.on2.vp9") || w <= 0 || h <= 0 || w > 8192 || h > 8192 || (w | h) & 1) {
@@ -418,9 +421,11 @@ static int h_acquire_output(void *obj, int *index, int64_t *time, unsigned *flag
     pthread_mutex_unlock(&m->mu);
     return st;
 }
+static int out_texture(Movie *m, int index, void *buf);
 static int h_get_output(void *obj, int index, void *buf) {
     Movie *m = find(obj); if (!m) return (int)orig(MOVIE_GET_OUTPUT, 3, (uint64_t[]){U(obj), (uint64_t)index, U(buf)});
     if (!buf) return ST_NULL;
+    if (m->mode == MODE_TEXTURE) return out_texture(m, index, buf);
     buf_set_range(buf, 0, 0);
     /* [port] the guest calls run before the lock: the decoder's lock is never held across guest code */
     uint8_t *dst = buf_base(buf); size_t cap = buf_capacity(buf);
@@ -445,6 +450,10 @@ static int h_get_output_size(void *obj, int *size, int *count) {
 }
 static int h_release_output(void *obj, int index) {
     Movie *m = find(obj); if (!m) return (int)orig(MOVIE_RELEASE_OUTPUT, 2, (uint64_t[]){U(obj), (uint64_t)index});
+    if (m->mode == MODE_TEXTURE && index >= 0 && index < OUT_BUFS) {   /* GetOutputBuffer released it already: the SDK reports success */
+        pthread_mutex_lock(&m->mu); int held = m->out_held[index]; pthread_mutex_unlock(&m->mu);
+        if (!held) return ST_OK;
+    }
     Signals s = {0};
     pthread_mutex_lock(&m->mu);
     int st = ST_ERROR;
@@ -496,3 +505,53 @@ HLE_NATIVE("_ZN5movie7Decoder24ReleaseOutputBufferIndexEi", h_release_output, 'w
 HLE_NATIVE("_ZN5movie7Decoder12GetLastErrorEv", h_get_last_error, 'w')
 HLE_NATIVE("_ZN5movie7Decoder15GetOutputBufferEiPNS_6BufferEPNS_9MediaDataE", h_get_output_md, 'w')
 HLE_NATIVE("_ZN5movie7Decoder21GetOutputBufferFormatEiPNS_9MediaDataE", h_get_output_buffer_format, 'w')
+
+/* [Pikmin 4] Native-texture mode (DecoderMode 2): the client's movie::Buffer data is its NVNtexture object, not memory.
+   The SDK's consumer draws the decoded frame into that texture and signals the buffer's NVNsync, then releases the output
+   (DecoderImpl::GetOutputBuffer renders and releases): here the frame is converted to RGBA (BT.709, limited range) and
+   written into the texture on the CPU (nvn_host_write_texture, as WriteTexels), the sync is signalled, and the slot is
+   released. An output without a picture (end of stream) leaves the texture with its last frame. */
+int nvn_host_texture_info(const void *t, int *w, int *h);
+void nvn_host_write_texture(const void *t, const void *rgba, int w, int h);
+void nvn_host_signal_sync(void *s);
+static inline uint8_t clamp8(int v) { return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
+static void nv12_to_rgba(const uint8_t *nv12, int sw, int sh, uint8_t *out, int w, int h) {
+    const uint8_t *uv = nv12 + (size_t)sw * sh;
+    for (int y = 0; y < h; y++) {
+        const uint8_t *yr = nv12 + (size_t)y * sw, *cr = uv + (size_t)(y / 2) * sw;
+        uint8_t *o = out + (size_t)y * w * 4;
+        for (int x = 0; x < w; x++) {
+            int c = 298 * (yr[x] - 16), d = cr[x & ~1] - 128, e = cr[(x & ~1) + 1] - 128;
+            o[0] = clamp8((c + 459 * e + 128) >> 8);
+            o[1] = clamp8((c - 55 * d - 136 * e + 128) >> 8);
+            o[2] = clamp8((c + 541 * d + 128) >> 8);
+            o[3] = 255; o += 4;
+        }
+    }
+}
+static int out_texture(Movie *m, int index, void *buf) {
+    void *tex = buf_base(buf);   /* guest calls before the decoder's lock */
+    void *sync = G.buf_nvn_sync ? (void *)(uintptr_t)GCALL(G.buf_nvn_sync, U(buf)) : NULL;
+    int tw = 0, th = 0;
+    if (!tex || nvn_host_texture_info(tex, &tw, &th) < 0) {
+        static int said; if (!said++) MLOG("texture mode: buffer data %p is not an NVN texture", tex);
+        return ST_NULL;
+    }
+    Signals s = {0};
+    pthread_mutex_lock(&m->mu);
+    if (index < 0 || index >= OUT_BUFS || !m->out_held[index]) { pthread_mutex_unlock(&m->mu); return ST_ERROR; }
+    int w = m->w < tw ? m->w : tw, h = m->h < th ? m->h : th, have = m->out_bytes[index] > 0 && w > 0 && h > 0;
+    if (have) {
+        uint8_t *p = realloc(m->rgba, (size_t)w * h * 4);
+        if (!p) runtime_fail("movie RGBA frame");
+        m->rgba = p;
+        nv12_to_rgba(m->out[index], m->w, m->h, m->rgba, w, h);
+    }
+    m->out_held[index] = 0; drain_pending(m, &s);
+    pthread_mutex_unlock(&m->mu);
+    if (have) nvn_host_write_texture(tex, m->rgba, w, h);
+    if (sync) nvn_host_signal_sync(sync);
+    fire(&s);
+    static int said; if (said++ < 2) MLOG("texture mode: output %d -> texture %p (%dx%d of %dx%d)%s", index, tex, w, h, tw, th, have ? "" : " (no picture)");
+    return ST_OK;
+}

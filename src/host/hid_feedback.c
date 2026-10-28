@@ -151,3 +151,14 @@ HLE_NATIVE("_ZN2nn3hid6detail18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE",
 HLE_NATIVE("_ZN2nn3hid6detail17StopSixAxisSensorERKNS0_19SixAxisSensorHandleE", six_stop, 'w')
 HLE_NATIVE("_ZN2nn3hid6detail22GetSixAxisSensorStatesEPiPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE", six_states, 'w')
 HLE_NATIVE("_ZN2nn3hid6detail21GetSixAxisSensorStateEPNS0_18SixAxisSensorStateERKNS0_19SixAxisSensorHandleE", six_state, 'w')
+
+/* [Pikmin 4] SDK 10.x calls the public nn::hid names (no detail:: layer, no Result) for the same operations. */
+static int six_states_public(SixAxisState *s, int max, const uint32_t *h) { int n = 0; six_states(&n, s, max, h); return n; }
+static void zero_drift(const uint32_t *h, const void *mode) { (void)h; (void)mode; }
+HLE_NATIVE("_ZN2nn3hid25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE", vib_init, 'v')
+HLE_NATIVE("_ZN2nn3hid18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14VibrationValueE", vib_send, 'v')
+HLE_NATIVE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21VibrationDeviceHandleE", vib_info, 'v')
+HLE_NATIVE("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", six_start, 'v')
+HLE_NATIVE("_ZN2nn3hid17StopSixAxisSensorERKNS0_19SixAxisSensorHandleE", six_stop, 'v')
+HLE_NATIVE("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE", six_states_public, 'w')
+HLE_NATIVE("_ZN2nn3hid25SetGyroscopeZeroDriftModeERKNS0_19SixAxisSensorHandleERKNS0_22GyroscopeZeroDriftModeE", zero_drift, 'v')

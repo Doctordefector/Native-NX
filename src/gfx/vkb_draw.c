@@ -132,6 +132,8 @@ static __thread struct {
     uint64_t tex[6][32], img[6][8];
     int depth_clamp, raster_discard;
     const char *bad_key;   // the unsupported shader of a program that cannot be drawn (audit)
+    const prog_t *stage_prog[6];   // [Pikmin 4] the program bound to each stage (NVN binds per stage mask)
+    prog_t comp;                   // [Pikmin 4] the stages' shaders combined: what S.prog points at
     int64_t copy_stride;
 } S;   // this recording thread's (vkb_mt.c gives each chunk the state at its start)
 
@@ -142,13 +144,38 @@ void vkb_state_reset(void) {
 }
 size_t vkb_state_size(void) { return sizeof S; }
 void vkb_state_save(void *dst) { memcpy(dst, &S, sizeof S); }
-void vkb_state_load(const void *src) { memcpy(&S, src, sizeof S); }
+void vkb_state_load(const void *src) { memcpy(&S, src, sizeof S); if (S.prog) S.prog = &S.comp; }   // [Pikmin 4] S.prog is this thread's S.comp
 
+static void compose_program(void) {   // [Pikmin 4] S.comp from the per-stage bindings
+    uint64_t ser = 0;
+    S.comp.nstage = 0;
+    for (int i = 0; i < 6; i++) {
+        const prog_t *p = S.stage_prog[i];
+        if (!p) continue;
+        for (unsigned k = 0; k < p->nstage && k < 6; k++) {
+            const uint8_t *ctl = p->sd[k].control;
+            uint32_t st;
+            if (!ctl) continue;
+            memcpy(&st, ctl + 0x714, 4);
+            if (st != (uint32_t)i || S.comp.nstage >= 6) continue;
+            S.comp.sd[S.comp.nstage++] = p->sd[k];
+            ser = (ser ^ ((p->serial + 1) * (uint64_t)(i + 1))) * 0x100000001B3ull;
+        }
+    }
+    S.comp.serial = S.comp.nstage ? (ser | 1) : 0;
+    S.prog = S.comp.nstage ? &S.comp : NULL;
+}
 void vkb_state(uint32_t op, const uint8_t *a) {
     switch (op) {
     case OP_BIND_PROGRAM: {
         const p_bind_program *b = (const p_bind_program *)a;
-        S.prog = b->prog;
+        /* [Pikmin 4] BindProgram(program, stage bits) binds the program for those stages only, and NULL unbinds them:
+           Unreal binds a vertex program (bit 0), a fragment program (bit 1) and NULL for geometry / tessellation. The
+           draw uses each stage's shader from the program bound to that stage (TOTK binds one program for all). */
+        for (int i = 0; i < 6; i++) if (b->stages & (1 << i)) S.stage_prog[i] = b->prog;
+        compose_program();
+        { static _Atomic uint64_t n, nul; static _Atomic int said; n++; if (!b->prog) nul++;   /* [Pikmin 4] diagnostic */
+          if ((n == 50 || n == 2000 || n == 20000) && atomic_fetch_add(&said, 1) < 3) VLOG("[diag] replayed BindProgram %llu, null %llu, mask %#x", (unsigned long long)n, (unsigned long long)nul, (unsigned)b->stages); }
         S.prog_serial = 0;   // resolved at the next draw
         break;
     }
@@ -964,7 +991,7 @@ static void bind_set(VkCommandBuffer cb, VkDescriptorSet set, int compute) {
 // (vkb_shader_get, SHA-256 of tens of KiB), and TOTK switches programs hundreds of times a frame - with only the
 // last one remembered, hashing took ~20% of the recording thread (Great Sky Island, 2026-10-24).
 static int resolve_program(void) {
-    if (!S.prog) return 0;
+    if (!S.prog) { static _Atomic int said; if (atomic_fetch_add(&said, 1) < 2) VLOG("draw with no program bound"); return 0; }   /* [Pikmin 4] diagnostic */
     if (S.prog_serial == S.prog->serial && S.prog_serial) return S.prog_ok;
     S.prog_serial = S.prog->serial;
     uint32_t at = (uint32_t)(S.prog_serial * 0x9E3779B97F4A7C15ull >> 51) & (PROGS - 1);
@@ -1580,6 +1607,15 @@ void vkb_draw(const uint8_t *a, int indexed) {
         if (S.sh[1]) trace_resources(S.sh[1], 1);
     }
     if (!resolve_program() || !S.sh[0]) {
+        { /* [Pikmin 4] diagnostic: why a draw has no program */
+          static _Atomic uint64_t n_null, n_bad, n_novs; static _Atomic int said;
+          if (!S.prog) n_null++; else if (!S.prog_ok) n_bad++; else n_novs++;
+          uint64_t tot = n_null + n_bad + n_novs;
+          if ((tot == 100 || tot == 5000 || tot == 50000) && atomic_fetch_add(&said, 1) < 3)
+              VLOG("[diag] no-program draws: no program %llu, a stage without shader %llu, no vertex stage %llu (last program %p, %u stages, stage0 %s)",
+                   (unsigned long long)n_null, (unsigned long long)n_bad, (unsigned long long)n_novs, (const void *)S.prog,
+                   S.prog ? S.prog->nstage : 0u, S.sh[1] ? "fs only" : S.sh[5] ? "compute" : "-");
+        }
         vkb_cnt_add(g_skipped[0], 1);
         vkb_audit(S.bad_key ? A_SHADER_UNSUPPORTED : A_DRAW_NO_PROGRAM, S.bad_key);
         if (trace) VLOG("[draw]   skipped: no program / translation");

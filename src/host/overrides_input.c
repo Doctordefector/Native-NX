@@ -202,3 +202,24 @@ HLE_NATIVE("_ZN2nn3hid15InitializeMouseEv", initialize_mouse, 'v')
 HLE_NATIVE("_ZN2nn3hid18InitializeKeyboardEv", initialize_keyboard, 'v')
 HLE_NATIVE("_ZN2nn3hid14GetMouseStatesEPNS0_10MouseStateEi", mouse_states, 'w')
 HLE_NATIVE("_ZN2nn3hid16GetKeyboardStateEPNS0_13KeyboardStateE", keyboard_state, 'v')
+
+/* [Pikmin 4] the single-state calls of SDK 10.x, the Joy-Con hold type / assignment queries, one mouse state, and the
+   touch screen (never touched: the keyboard and controllers drive the game). */
+static void full_state(NpadState *out, const uint32_t *id) { pad_states(out, 1, id, 1); }
+static void handheld_state(NpadState *out, const uint32_t *id) { pad_states(out, 1, id, 2); }
+static void disconnected_state(NpadState *out, const uint32_t *id) { disconnected_states(out, 1, id); }
+static int joy_hold_type(void) { return 1; }            /* Horizontal, the SDK default */
+static int joy_assignment(const uint32_t *id) { (void)id; return 0; }   /* Dual */
+static void mouse_state(MouseState *out) { mouse_states(out, 1); }
+static void initialize_touch(void) {}
+static void touch_state16(void *out) { if (out) memset(out, 0, 16 + 16 * 0x28); }   /* sampling, count 0, 16 touches */
+HLE_NATIVE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadFullKeyStateERKj", full_state, 'v')
+HLE_NATIVE("_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", handheld_state, 'v')
+HLE_NATIVE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj", disconnected_state, 'v')
+HLE_NATIVE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyLeftStateERKj", disconnected_state, 'v')
+HLE_NATIVE("_ZN2nn3hid12GetNpadStateEPNS0_17NpadJoyRightStateERKj", disconnected_state, 'v')
+HLE_NATIVE("_ZN2nn3hid18GetNpadJoyHoldTypeEv", joy_hold_type, 'w')
+HLE_NATIVE("_ZN2nn3hid20GetNpadJoyAssignmentERKj", joy_assignment, 'w')
+HLE_NATIVE("_ZN2nn3hid13GetMouseStateEPNS0_10MouseStateE", mouse_state, 'v')
+HLE_NATIVE("_ZN2nn3hid21InitializeTouchScreenEv", initialize_touch, 'v')
+HLE_NATIVE("_ZN2nn3hid19GetTouchScreenStateILm16EEEvPNS0_16TouchScreenStateIXT_EEE", touch_state16, 'v')

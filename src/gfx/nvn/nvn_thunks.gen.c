@@ -276,6 +276,10 @@ static void T_nvnCommandBufferCallCommands(Cpu *c) {
     static void *f; if (!f) f = nvn_impl_fn("nvnCommandBufferCallCommands", 0);
     ((void (*)(void *, int, void *))f)((void *)(uintptr_t)c->x[0], (int)c->x[1], (void *)(uintptr_t)c->x[2]);
 }
+static void T_nvnCommandBufferClearBuffer(Cpu *c) {
+    static void *f; if (!f) f = nvn_impl_fn("nvnCommandBufferClearBuffer", 0);
+    ((void (*)(void *, NVNbufferAddress, size_t, uint32_t))f)((void *)(uintptr_t)c->x[0], (NVNbufferAddress)c->x[1], (size_t)c->x[2], (uint32_t)c->x[3]);
+}
 static void T_nvnCommandBufferClearColor(Cpu *c) {
     static void *f; if (!f) f = nvn_impl_fn("nvnCommandBufferClearColor", 0);
     ((void (*)(void *, int, void *, int))f)((void *)(uintptr_t)c->x[0], (int)c->x[1], (void *)(uintptr_t)c->x[2], (int)c->x[3]);
@@ -1765,6 +1769,7 @@ const struct { const char *name; void (*fn)(Cpu *); } nvn_thunks[] = {
     {"nvnCommandBufferBindVertexBuffers", T_nvnCommandBufferBindVertexBuffers},
     {"nvnCommandBufferBindVertexStreamState", T_nvnCommandBufferBindVertexStreamState},
     {"nvnCommandBufferCallCommands", T_nvnCommandBufferCallCommands},
+    {"nvnCommandBufferClearBuffer", T_nvnCommandBufferClearBuffer},
     {"nvnCommandBufferClearColor", T_nvnCommandBufferClearColor},
     {"nvnCommandBufferClearDepthStencil", T_nvnCommandBufferClearDepthStencil},
     {"nvnCommandBufferClearTexture", T_nvnCommandBufferClearTexture},
@@ -2121,4 +2126,4 @@ const struct { const char *name; void (*fn)(Cpu *); } nvn_thunks[] = {
     {"nvnWindowSetNumActiveTextures", T_nvnWindowSetNumActiveTextures},
     {"nvnWindowSetPresentInterval", T_nvnWindowSetPresentInterval},
 };
-const unsigned nvn_thunk_count = 423;
+const unsigned nvn_thunk_count = 424;

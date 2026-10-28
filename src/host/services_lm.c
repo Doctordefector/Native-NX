@@ -33,7 +33,11 @@ static void lm(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
 }
 
 void runtime_audio_register(void);  // audio_renderer.c
+void runtime_hwopus_register(void);  // hwopus_service.c [Pikmin 4]
+void runtime_audout_register(void);  // audout_service.c [Pikmin 4]
 void host_services_register(void) {
     runtime_ipc_register("lm", lm, NULL, NULL);
     runtime_audio_register();
+    runtime_hwopus_register();
+    runtime_audout_register();
 }

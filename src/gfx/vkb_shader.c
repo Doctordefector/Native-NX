@@ -386,13 +386,39 @@ static void prewarm_start(void) {
     }
 }
 
+/* [Pikmin 4] TOTK_SHADER_CAPTURE=<dir>: a shader with no translation is written as <dir>/raw/<key>.ctl (the 0x880-byte
+   control section) + <key>.bin (the code as the game hands it over) and listed in <dir>/captured.tsv, the same files
+   tools/export_shaders.py makes from TOTK's RomFS. A game whose shaders are not findable at build time (Unreal's are
+   in its pak) gets them by playing; nxrecomp/shaders_from_capture.py translates them. Called with g_mu held. */
+static void capture_shader(const char *key, uint32_t stage, const uint8_t *control, const void *code, uint32_t length) {
+    static int on = -1; static char dir[1024];
+    if (on < 0) { const char *e = getenv("TOTK_SHADER_CAPTURE"); on = e && *e; if (on) snprintf(dir, sizeof dir, "%s", e); }
+    if (!on) return;
+    char path[1200];
+    snprintf(path, sizeof path, "%s/raw", dir);
+    CreateDirectoryA(dir, NULL); CreateDirectoryA(path, NULL);
+    snprintf(path, sizeof path, "%s/raw/%s.ctl", dir, key);
+    FILE *f = fopen(path, "wb");
+    if (!f) { VLOG("shader capture: cannot write %s", path); on = 0; return; }
+    fwrite(control, 1, 0x880, f); fclose(f);
+    snprintf(path, sizeof path, "%s/raw/%s.bin", dir, key);
+    if ((f = fopen(path, "wb"))) { fwrite(code, 1, length, f); fclose(f); }
+    snprintf(path, sizeof path, "%s/captured.tsv", dir);
+    if ((f = fopen(path, "a"))) { fprintf(f, "%s\t%u\n", key, stage); fclose(f); }
+    static unsigned n; if (++n % 100 == 1) VLOG("shader capture: %u shaders written to %s", n, dir);
+}
+
 const vkb_shader *vkb_shader_get(const NVNshaderData *sd) {
     const uint8_t *control = sd->control;
-    if (!control || !sd->data) return NULL;
+    static _Atomic int said_null, said_bad;   /* [Pikmin 4] why a stage has no shader (these paths capture nothing) */
+    if (!control || !sd->data) { if (atomic_fetch_add(&said_null, 1) < 4) VLOG("shader: stage without control or data (control %p data %#llx)", (const void *)control, (unsigned long long)sd->data); return NULL; }
     uint32_t length, stage;
     memcpy(&length, control + 0x704, 4);
     memcpy(&stage, control + 0x714, 4);
-    if (!length || length > (16u << 20) || (stage != 0 && stage != 1 && stage != 5)) return NULL;
+    if (!length || length > (16u << 20) || (stage != 0 && stage != 1 && stage != 5)) {
+        if (atomic_fetch_add(&said_bad, 1) < 8) VLOG("shader: unsupported stage %u or length %u", stage, length);
+        return NULL;
+    }
     char key[65];
     sha256_hex(control, 0x880, (const void *)(uintptr_t)sd->data, length, key);
     static pthread_once_t once = PTHREAD_ONCE_INIT;
@@ -416,6 +442,7 @@ const vkb_shader *vkb_shader_get(const NVNshaderData *sd) {
         else {
             e->sh.obj = VK_NULL_HANDLE;
             if (g_missing++ < 16) VLOG("shader %s (stage %u): no translation in %s", key, stage, cache_dir());
+            capture_shader(key, stage, control, (const void *)(uintptr_t)sd->data, length);
         }
         e->next = g_tab[h];
         g_tab[h] = e;

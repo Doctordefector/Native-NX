@@ -25,6 +25,8 @@ const nvn_impl *nvn_registry_extras(unsigned *n) { return range(extras_start, ex
 void *nvn_impl_fn(const char *name, int extra) {
     unsigned n;
     const nvn_impl *t = extra ? nvn_registry_extras(&n) : nvn_registry_impls(&n);
+    static int first = -1; if (first < 0) first = getenv("TOTK_NVN_FIRSTCALL") != NULL;   /* [Pikmin 4] each function's first call */
+    if (first) LOG("[firstcall] %s", name);
     for (unsigned i = 0; i < n; i++) if (t[i].name && !strcmp(t[i].name, name)) return t[i].fn;
     LOG("NVN implementation %s missing from the registry", name);
     runtime_fail("NVN registry");
