@@ -967,7 +967,8 @@ static void write_stage(writes_t *W, VkDescriptorSet set, const vkb_shader *sh, 
                                              : vkb_layout_is(im, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
         /* [Pikmin 4] a view that cannot have the type the shader declares (Unreal binds its 2D dummy textures to volume and
            cube slots): a dummy of the declared type - a 2D-array view in a 3D binding loses the device on NVIDIA */
-        int fits = !im || !((vt == VK_IMAGE_VIEW_TYPE_3D && im->depth <= 1) || (vt != VK_IMAGE_VIEW_TYPE_3D && im->depth > 1) ||
+        int is3d = im && im->d.target == NVN_TEXTURE_TARGET_3D;   // the image's type (a 1x1x1 volume is 3D: Unreal's default volume texture)
+        int fits = !im || !((vt == VK_IMAGE_VIEW_TYPE_3D) != is3d ||
                             ((vt == VK_IMAGE_VIEW_TYPE_CUBE || vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) && im->layers < 6));
         if (!fits) { static int said; if (said++ < 8) VLOG("[temporary] shader %.12s: texture %llu (%ux%ux%u, %u layers) does not fit a view of type %d: a dummy",
                                                           sh->key ? sh->key : "?", (unsigned long long)im->serial, im->width, im->height, im->depth, im->layers, (int)vt); }
@@ -984,7 +985,7 @@ static void write_stage(writes_t *W, VkDescriptorSet set, const vkb_shader *sh, 
         const view_t *v = NULL;
         vkb_image *im = handle_image(S.img[stage][sh->img[i].slot], &v);
         VkImageViewType ivt = view_type_of(sh->img[i].type);   // [Pikmin 4] as the shader declares it
-        int ifits = im && (ivt == VK_IMAGE_VIEW_TYPE_3D) == (im->depth > 1);
+        int ifits = im && (ivt == VK_IMAGE_VIEW_TYPE_3D) == (im->d.target == NVN_TEXTURE_TARGET_3D);
         VkImageView view = im && ifits && vkb_layout_is(im, VK_IMAGE_LAYOUT_GENERAL) ? vkb_view(im, v, 2, -1) : VK_NULL_HANDLE;
         if (!view) vkb_audit(A_IMG_MISSING, sh->key);
         VkDescriptorImageInfo info = {VK_NULL_HANDLE, view ? view : dummy_view(ivt), VK_IMAGE_LAYOUT_GENERAL};

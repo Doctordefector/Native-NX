@@ -534,6 +534,12 @@ static void capture_shader(const char *key, uint32_t stage, const uint8_t *contr
     char path[1200];
     snprintf(path, sizeof path, "%s/raw", dir);
     CreateDirectoryA(dir, NULL); CreateDirectoryA(path, NULL);
+    {   // [Pikmin 4] the game's depth mode, for the translation (shaders_from_capture.py: depth_minus_w only for near=-w)
+        int totk_depth_near_minus_w(void);
+        snprintf(path, sizeof path, "%s/depth_mode.txt", dir);
+        FILE *m = fopen(path, "w");
+        if (m) { fputs(totk_depth_near_minus_w() ? "minus_w\n" : "zero\n", m); fclose(m); }
+    }
     snprintf(path, sizeof path, "%s/raw/%s.ctl", dir, key);
     FILE *f = fopen(path, "wb");
     if (!f) { VLOG("shader capture: cannot write %s", path); on = 0; return; }
