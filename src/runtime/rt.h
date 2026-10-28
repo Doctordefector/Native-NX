@@ -15,14 +15,16 @@
 // startup; pages are committed when first used. The code bases are baked into the generated C (tools/gen_game.py).
 #define GUEST_LO      0x0800000000ull
 #define GUEST_HI      0x8000000000ull   // 2^39
+// [Pikmin 4] main is 0xa68c000 bytes (TOTK's is under 0x4000000): the other modules and the host regions move up.
+// Must match the bases nxrecomp lifts with (main 0x0800000000, subsdk0 0x080B000000, sdk 0x080C000000).
 #define MAIN_BASE     0x0800000000ull
-#define SUBSDK0_BASE  0x0804000000ull
-#define SDK_BASE      0x0805000000ull
-#define HLE_BASE      0x0808000000ull   // fake guest addresses of host-implemented functions (16 bytes each)
+#define SUBSDK0_BASE  0x080B000000ull
+#define SDK_BASE      0x080C000000ull
+#define HLE_BASE      0x0810000000ull   // fake guest addresses of host-implemented functions (16 bytes each)
 #define HLE_SIZE      0x0000100000ull
-#define TLS_BASE      0x0809000000ull   // per-thread TLS blocks (tpidrro_el0)
+#define TLS_BASE      0x0811000000ull   // per-thread TLS blocks (tpidrro_el0)
 #define TLS_SIZE      0x0000100000ull
-#define HLE_HEAP      0x080A000000ull   // guest-visible memory owned by host code
+#define HLE_HEAP      0x0812000000ull   // guest-visible memory owned by host code
 #define HLE_HEAP_SIZE 0x000E000000ull
 
 // ---- loader.c

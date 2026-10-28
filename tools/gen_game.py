@@ -9,7 +9,7 @@ import sys
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-MODULES = {'main': 0x0800000000, 'subsdk0': 0x0804000000, 'sdk': 0x0805000000}
+MODULES = {'main': 0x0800000000, 'subsdk0': 0x080B000000, 'sdk': 0x080C000000}   # [Pikmin 4] see src/runtime/rt.h
 
 
 def main():
