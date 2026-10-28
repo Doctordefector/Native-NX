@@ -102,6 +102,13 @@ HLE_FUNC("_ZN2nn3aoc16ListAddOnContentEPiii", host_aoc_list) {
     if ((int)c->x[1] < 0 || (int)c->x[2] < 0) runtime_fail("invalid add-on content list range");
     c->x[0] = 0;
 }
+/* [Pikmin 4] Unreal's DLC watcher thread waits on this event; the DLC list never changes here, so it never fires. */
+HLE_FUNC("_ZN2nn3aoc31GetAddOnContentListChangedEventEPNS_2os11SystemEventE", host_aoc_changed_event) {
+    void *event = (void *)(uintptr_t)c->x[0];
+    if (!event) runtime_fail("add-on content list event");
+    hle_bind_system_event(event, 0);
+    c->x[0] = 0;
+}
 HLE_FUNC("_ZN2nn3err26InitializeContextWriterApiEv", host_error_init) { (void)c; fprintf(stderr, "[totk] error contexts: local diagnostics\n"); }
 HLE_FUNC("_ZN2nn4pctl10InitializeEv", host_pctl_init) { (void)c; fprintf(stderr, "[totk] local application parental controls initialized\n"); }
 HLE_FUNC("_ZN2nn4diag34InitializeApplicationAbortObserverEv", host_abort_init) { (void)c; fprintf(stderr, "[totk] native crash observer initialized\n"); }

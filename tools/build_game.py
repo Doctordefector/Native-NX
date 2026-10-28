@@ -19,7 +19,7 @@ import version  # noqa: E402
 RUNTIME = ['src/runtime/dispatch.c', 'src/runtime/loader.c', 'src/runtime/platform/windows.c']
 TARGETS = {'probe_cpu': ['src/probe/probe_cpu.c'],
            'ultratears': ['src/host/boot.c', 'src/host/guest.c', 'src/host/svc.c', 'src/host/threads.c', 'src/host/ipc.c',
-                    'src/host/services_lm.c', 'src/host/overrides_oe.c',
+                    'src/host/services_lm.c', 'src/host/services_offline.c', 'src/host/overrides_oe.c',
                     'src/host/overrides_time.c',
                     'src/host/fs.c', 'src/host/account.c',
                     'src/host/overrides_applet.c', 'src/host/overrides_input.c',

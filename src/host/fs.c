@@ -287,7 +287,7 @@ static unsigned rom_cache_size(uint64_t *out) { if (!out) return R_ROM_INVALID; 
 /* =============================== save, temporary and cache storage =============================== */
 typedef struct { int kind; char name[32]; char root[1024]; } Mount;
 typedef struct { int fd, mode, save; } File;   /* save: on a save-data mount (counts for runtime_fs_save_busy) */
-typedef struct { DIR *dir; char path[1024]; int mode; } Dir;
+typedef struct { DIR *dir; char path[4200]; int mode; } Dir;   /* [Pikmin 4] RomFS folder paths: open_directory p[] */
 static Mount mounts[16];
 static File files[NFILES];
 static Dir dirs[NDIRS];
@@ -643,10 +643,22 @@ static unsigned delete_recursive(const char *path) {
     return remove_tree(p) ? R_INVALID_ARGUMENT : 0;
 }
 static unsigned open_directory(uint64_t *out, const char *path, int mode) {
-    if (romfs_owns(path)) { fprintf(stderr, "[totk] OpenDirectory on RomFS %s\n", path); runtime_fail("RomFS directory listing not implemented"); }
-    char p[1100];
-    unsigned r = host_path(path, p, sizeof p);
-    if (r) return r;
+    char p[4200];
+    if (romfs_owns(path)) {
+        /* [Pikmin 4] Unreal lists the RomFS for its .pak files. A RomFS folder is listed directly; the packed image
+           (TOTK's romfs.bin) still has no directory listing. */
+        if (!rom_folder) { fprintf(stderr, "[totk] OpenDirectory on RomFS %s\n", path); runtime_fail("RomFS directory listing not implemented"); }
+        const char *rel = path + strlen(mount_name) + 1;
+        while (*rel == '/') ++rel;
+        if (*rel && !(rel = rom_path(path))) return R_PATH_NOT_FOUND;
+        snprintf(p, sizeof p, "%s%s%s", rom_dir, *rel ? "/" : "", rel);
+        size_t n = strlen(p);
+        while (n > 1 && p[n - 1] == '/') p[--n] = 0;
+        runtime_fs_log("romdir", p);
+    } else {
+        unsigned r = host_path(path, p, sizeof p);
+        if (r) return r;
+    }
     if (!out || mode < 1 || mode > 3) return R_INVALID_ARGUMENT;
     DIR *d = opendir(p);
     if (!d) return errno_result();
