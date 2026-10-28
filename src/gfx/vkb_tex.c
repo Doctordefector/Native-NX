@@ -94,8 +94,8 @@ VkFormat vkb_format(int f, VkImageAspectFlags *aspect, int *astc) {
     case 0x6D: return VK_FORMAT_R8G8B8A8_UNORM;      case 0x71: return VK_FORMAT_R16G16B16A16_SFLOAT;
     case 0x76: return VK_FORMAT_R32G32B32A32_SFLOAT;
     case 0x95: case 0x96: case 0x97: return VK_FORMAT_R5G5B5A1_UNORM_PACK16;
-    case 0x98: case 0x99: return VK_FORMAT_B8G8R8A8_UNORM;
-    case 0x9A: case 0x9B: return VK_FORMAT_B8G8R8A8_SRGB;
+    case 0x99: case 0x9A: return VK_FORMAT_B8G8R8A8_UNORM;   // BGRX8, BGRA8 (nvn.h; 0x98 is A1BGR5)
+    case 0x9B: case 0x9C: return VK_FORMAT_B8G8R8A8_SRGB;    // BGRX8_SRGB, BGRA8_SRGB (Pikmin 4's movie textures)
     default: return VK_FORMAT_UNDEFINED;
     }
 }
@@ -465,7 +465,7 @@ static VkComponentSwizzle swz(uint8_t s, VkComponentSwizzle identity) {
 
 // Formats without alpha read a = 1 (RGBX, RGB DXT1): NVN_FORMAT values, as MacNativeGames' format table.
 static int alpha_one(int f) {
-    return f == 0x37 || f == 0x41 || f == 0x45 || (f >= 0x6D && f <= 0x78) || f == 0x96 || f == 0x98 || f == 0x9A;
+    return f == 0x37 || f == 0x41 || f == 0x45 || (f >= 0x6D && f <= 0x78) || f == 0x96 || f == 0x99 || f == 0x9B;   // BGR5, BGRX8, BGRX8_SRGB
 }
 
 VkImageView vkb_view(vkb_image *im, const view_t *v, int attachment, int view_type) {
