@@ -6,7 +6,7 @@
 //  - [temporary] The translation is the default variant from the translator comparison (work/shaders/v143/ryujinx: every
 //    texture 2D-typed by its own reflection, attributes and outputs float). The runtime translation service with
 //    variants per bound state (MacNativeGames' totk_shader_rt) replaces it before the open world.
-//  - Descriptors: one universal layout. Each stage owns 64 bindings of set 0 (vertex 0-63, fragment 64-127; compute its
+//  - Descriptors: one universal layout. Each stage owns 68 bindings of set 0 (vertex 0-67, fragment 68-135; compute its
 //    own layout): +0 Ryujinx support buffer, +1..17 constant buffers c0-c16, +18..33 storage buffers, +34..57 combined
 //    textures, +58..61 images. The translator numbers bindings densely per shader; they are rewritten in the SPIR-V
 //    when it is loaded, so any vertex shader combines with any fragment shader under one pipeline layout.
@@ -30,8 +30,8 @@ static VkPipelineLayout g_playout[2];
 
 static void make_layouts(void) {
     for (int compute = 0; compute < 2; compute++) {
-        VkDescriptorSetLayoutBinding b[128];
-        VkDescriptorBindingFlags fl[128];
+        VkDescriptorSetLayoutBinding b[2 * VKB_STAGE_BINDINGS];
+        VkDescriptorBindingFlags fl[2 * VKB_STAGE_BINDINGS];
         uint32_t n = 0;
         for (int st = 0; st < (compute ? 1 : 2); st++) {
             VkShaderStageFlags sf = compute ? VK_SHADER_STAGE_COMPUTE_BIT : st ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT;
@@ -39,7 +39,8 @@ static void make_layouts(void) {
             struct { uint32_t off, count; VkDescriptorType type; } r[] = {
                 {VKB_B_SUPPORT, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}, {VKB_B_CBUF, VKB_NCBUF, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},
                 {VKB_B_SBUF, VKB_NSBUF, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER}, {VKB_B_TEX, VKB_NTEX, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER},
-                {VKB_B_IMG, VKB_NIMG, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}};
+                {VKB_B_IMG, VKB_NIMG, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE}, {VKB_B_TBUF, VKB_NTBUF, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER},
+                {VKB_B_STBUF, VKB_NSTBUF, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER}};
             for (unsigned k = 0; k < sizeof r / sizeof *r; k++)
                 for (uint32_t i = 0; i < r[k].count; i++) {
                     b[n] = (VkDescriptorSetLayoutBinding){base + r[k].off + i, r[k].type, 1, sf, NULL};
@@ -165,6 +166,60 @@ static size_t drop_cull_distance(uint32_t *w, size_t n) {
     return o;
 }
 
+/* [Pikmin 4] Ryujinx declares a buffer texture as a sampled image of Dim Buffer, which Vulkan does not allow (a uniform
+   texel buffer is an image of Dim Buffer, Sampled 1, without a sampler). Rewrites, in place: the UniformConstant
+   pointer to that sampled image points to the image; loads of it give the image; OpImage of such a load becomes
+   OpCopyObject; the sampled image type is dropped; capability SampledBuffer is added if missing (one word pair: the
+   caller leaves room for 2 words). Returns the new word count. */
+static size_t texel_buffers(uint32_t *w, size_t n) {
+    enum { MAXT = 16 };
+    uint32_t si[MAXT], img[MAXT], nsi = 0, loads[64], nl = 0;
+    int has_cap = 0;
+    size_t cap_at = 0;
+    uint32_t buf_img[MAXT], nbi = 0;
+    for (size_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
+        if (!wc || i + wc > n) return n;
+        if (op == 17) { if (w[i + 1] == 46) has_cap = 1; if (!cap_at) cap_at = i; }   // OpCapability SampledBuffer
+        if (op == 25 && wc >= 9 && w[i + 3] == 5 && nbi < MAXT) buf_img[nbi++] = w[i + 1];   // OpTypeImage Dim Buffer
+        if (op == 27 && wc == 3 && nsi < MAXT)                                               // OpTypeSampledImage
+            for (uint32_t k = 0; k < nbi; k++) if (w[i + 2] == buf_img[k]) { si[nsi] = w[i + 1]; img[nsi++] = buf_img[k]; }
+        i += wc;
+    }
+    int need47 = 0, has47 = 0;
+    for (size_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, wc = w[i] >> 16;
+        if (!wc) break;
+        if (op == 17 && w[i + 1] == 47) has47 = 1;
+        if (op == 25 && wc >= 9 && w[i + 3] == 5 && w[i + 7] == 2) need47 = 1;   // OpTypeImage Dim Buffer, Sampled 2 (storage)
+        i += wc;
+    }
+    if (need47 && !has47 && cap_at) {   // capability ImageBuffer
+        memmove(&w[cap_at + 2], &w[cap_at], (n - cap_at) * 4);
+        w[cap_at] = (2u << 16) | 17; w[cap_at + 1] = 47;
+        n += 2;
+    }
+    if (!nsi) return n;
+    size_t o = 5;
+    for (size_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, wc = w[i] >> 16, drop = 0;
+        if (op == 27 && wc == 3) for (uint32_t k = 0; k < nsi; k++) drop |= w[i + 1] == si[k];
+        if (op == 32 && wc == 4) for (uint32_t k = 0; k < nsi; k++) if (w[i + 3] == si[k]) w[i + 3] = img[k];   // OpTypePointer
+        if (op == 61 && wc >= 4) for (uint32_t k = 0; k < nsi; k++)                                             // OpLoad
+            if (w[i + 1] == si[k]) { w[i + 1] = img[k]; if (nl < 64) loads[nl++] = w[i + 2]; }
+        if (op == 100 && wc == 4) for (uint32_t k = 0; k < nl; k++)                                             // OpImage
+            if (w[i + 3] == loads[k]) w[i] = (4u << 16) | 83;                                                   // -> OpCopyObject
+        if (!drop) { memmove(&w[o], &w[i], wc * 4); o += wc; }
+        i += wc;
+    }
+    if (!has_cap && cap_at) {
+        memmove(&w[cap_at + 2], &w[cap_at], (o - cap_at) * 4);
+        w[cap_at] = (2u << 16) | 17; w[cap_at + 1] = 46;
+        o += 2;
+    }
+    return o;
+}
+
 static VkResult create_object(VkShaderStageFlagBits stage, const uint32_t *spv, size_t bytes, VkShaderEXT *obj) {
     VkDescriptorSetLayout layout = vkb_set_layout(stage == VK_SHADER_STAGE_COMPUTE_BIT);
     VkShaderCreateInfoEXT ci = {VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT, .stage = stage,
@@ -274,25 +329,40 @@ static int load(vkb_shader *s, const char *key, int nvn_stage) {
                 static int said; if (said++ < 8) VLOG("shader %s: texture handle %#lx not understood", key, raw);
                 s->unsupported = 1; continue;
             }
-            vkb_tex_ref *t = &s->tex[s->ntex];
+            int tb = type == 2;   // [Pikmin 4] TextureBuffer: a uniform texel buffer
+            if (tb && s->ntbuf >= VKB_NTBUF) { s->unsupported = 1; continue; }
+            vkb_tex_ref *t = tb ? &s->tbuf[s->ntbuf] : &s->tex[s->ntex];
             t->separate = h >= 0x168;
             t->slot = (uint8_t)((h - (t->separate ? 0x168 : 0x20)) / 8);
             t->sslot = kind == 1 ? (uint8_t)((h1 - 0x568) / 8) : 0;
             t->type = (uint16_t)type;
+            if (tb) { remap[b] = base + VKB_B_TBUF + (uint32_t)s->ntbuf++; continue; }
             remap[b] = base + VKB_B_TEX + (uint32_t)s->ntex++;
         }
     if ((p = json_array(j, "images")))
         for (; (p = json_next(p, &e)); p = e) {
             long b = json_int(p, e, "binding", -1), h = json_int(p, e, "handle", -1) * 4, type = json_int(p, e, "type", 3);
-            if (b < 0 || b > 255 || s->nimg >= VKB_NIMG || h < 0x120) { s->unsupported = 1; continue; }
-            s->img[s->nimg] = (vkb_tex_ref){(uint8_t)((h - 0x120) / 8), 0, (uint16_t)type};
+            int sb = type == 2;   // [Pikmin 4] ImageBuffer: a storage texel buffer
+            if (b < 0 || b > 255 || (sb ? s->nstbuf >= VKB_NSTBUF : s->nimg >= VKB_NIMG) || h < 0x120) { s->unsupported = 1; continue; }
             s->stores = 1;   // [temporary] images are taken as written (the reflection has no read-only mark)
+            if (sb) {
+                s->stbuf[s->nstbuf] = (vkb_tex_ref){(uint8_t)((h - 0x120) / 8), 0, (uint16_t)type};
+                remap[b] = base + VKB_B_STBUF + (uint32_t)s->nstbuf++;
+                continue;
+            }
+            s->img[s->nimg] = (vkb_tex_ref){(uint8_t)((h - 0x120) / 8), 0, (uint16_t)type};
             remap[b] = base + VKB_B_IMG + (uint32_t)s->nimg++;
         }
     s->frag_outputs = (uint32_t)json_top_int(j, "frag_out_map", 0);
     free(j);
     // rewrite Binding decorations (OpDecorate %id Binding n: opcode 71, decoration 33)
+    if (s->ntbuf || s->nstbuf) {   // [Pikmin 4] room for the capabilities texel_buffers may add
+        uint32_t *g = realloc(spv, nspv + 16);
+        if (!g) die("shader memory");
+        spv = g;
+    }
     size_t nw = drop_cull_distance(spv, nspv / 4);
+    if (s->ntbuf || s->nstbuf) nw = texel_buffers(spv, nw);
     nspv = nw * 4;
     for (size_t i = 5; i < nw;) {
         uint32_t op = spv[i] & 0xffff, wc = spv[i] >> 16;

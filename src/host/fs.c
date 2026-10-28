@@ -523,7 +523,13 @@ static unsigned read_file(uint64_t *out, uint64_t h, int64_t offset, void *buffe
             fprintf(stderr, "[totk-fs] %8.3f reads so far: %llu calls, %.1f MB\n", (now - fs_log_t0) / 1e9,
                     (unsigned long long)atomic_load(&calls), atomic_load(&bytes) / 1e6);
     }
-    if (romfs_handle(h)) return romfs_read(out, h, offset, buffer, size);
+    if (romfs_handle(h)) {
+        unsigned r = romfs_read(out, h, offset, buffer, size);
+        static int each = -1; if (each < 0) { const char *e = getenv("TOTK_FS_LOG"); each = e && atoi(e) >= 2; }
+        if (each) fprintf(stderr, "[totk-fs] %8.3f romread h=%#llx off=%#llx size=%#llx -> %#x got %#llx\n", (runtime_now_ns() - fs_log_t0) / 1e9,
+                          (unsigned long long)h, (unsigned long long)offset, (unsigned long long)size, r, (unsigned long long)(out ? *out : 0));
+        return r;
+    }
     int fd, mode;
     if (!out || offset < 0 || (!buffer && size) || !file_of(h, &fd, &mode)) return R_INVALID_ARGUMENT;
     if (!(mode & OPEN_READ)) return R_OPEN_MODE;

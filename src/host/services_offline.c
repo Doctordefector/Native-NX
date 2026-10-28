@@ -4,6 +4,7 @@
  * Without these the SDK's own versions open services (nifm:u, bsd:u, bcat:u, prepo:u, ...) the host does not serve.
  * Results: module 110 (nifm), 122 (bcat), 129 (prepo), 166 (web/applet), 203 (ldn), 123 (ssl) "not available". */
 #include <stdio.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include "host.h"
@@ -26,10 +27,23 @@ static uint32_t nifm_offline(void) { return R_NIFM_OFFLINE; }
 static uint32_t nifm_proxy(void *out) { if (out) memset(out, 0, 0xAA); return R_NIFM_OFFLINE; }
 HLE_NATIVE("_ZN2nn4nifm10InitializeEv", ok, 'w')
 HLE_NATIVE("_ZN2nn4nifm18IsNetworkAvailableEv", no, 'b')
-HLE_NATIVE("_ZN2nn4nifm22IsNetworkRequestOnHoldEv", no, 'b')
-HLE_NATIVE("_ZN2nn4nifm20SubmitNetworkRequestEv", none, 'v')
+/* [Pikmin 4] after nxnative's hle_net.c: on Horizon a submitted request stays on hold until nifm has evaluated it, so the
+   first query after SubmitNetworkRequest finds it on hold. Pikmin 4's BCAT thread ("OlimarMemo", main+0x203f510) sets its
+   status 2, submits, waits while on hold, then stores 6 (offline); its creator stores 1 only after starting the thread.
+   Answered "not on hold" at once, the thread could finish first, the 1 overwrote the 6 and the boot state machine waited
+   for that status forever at the black loading screen. */
+static _Atomic int nifm_hold;
+static void nifm_submit(void) { atomic_store(&nifm_hold, 1); }
+static void nifm_cancel(void) { atomic_store(&nifm_hold, 0); }
+static unsigned char nifm_on_hold(void) {
+    int h = atomic_load(&nifm_hold);
+    while (h > 0 && !atomic_compare_exchange_weak(&nifm_hold, &h, h - 1)) {}
+    return h > 0;
+}
+HLE_NATIVE("_ZN2nn4nifm22IsNetworkRequestOnHoldEv", nifm_on_hold, 'b')
+HLE_NATIVE("_ZN2nn4nifm20SubmitNetworkRequestEv", nifm_submit, 'v')
 HLE_NATIVE("_ZN2nn4nifm27SubmitNetworkRequestAndWaitEv", none, 'v')
-HLE_NATIVE("_ZN2nn4nifm20CancelNetworkRequestEv", none, 'v')
+HLE_NATIVE("_ZN2nn4nifm20CancelNetworkRequestEv", nifm_cancel, 'v')
 HLE_NATIVE("_ZN2nn4nifm31HandleNetworkRequestErrorResultEv", nifm_offline, 'w')
 HLE_NATIVE("_ZN2nn4nifm22GetCurrentProxySettingEPNS0_12ProxySettingE", nifm_proxy, 'w')
 

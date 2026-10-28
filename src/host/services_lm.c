@@ -12,11 +12,26 @@ static unsigned long g_packets;
 
 static void logger(IpcSession *s, const IpcRequest *rq, IpcResponse *rs) {
     switch (rq->cmd) {
-    case 0:   /* Log(buffer) */
-        if (getenv("TOTK_LM_LOG") && (++g_packets % 100) == 1)
-            fprintf(stderr, "[totk-lm] %lu log packets (%llu bytes last)\n", g_packets,
-                    (unsigned long long)(rq->nx ? rq->x[0].size : rq->na ? rq->a[0].size : 0));
+    case 0: {   /* Log(buffer) */
+        if (!getenv("TOTK_LM_LOG")) return;
+        ++g_packets;
+        /* [Pikmin 4] print the text: a 24-byte header (payload size at +0x14), then chunks {u8 key, ULEB128 size, data};
+           key 2 = text log (Atmosphere's LogDataChunkKey) */
+        IpcBuffer b = rq->nx ? rq->x[0] : rq->na ? rq->a[0] : (IpcBuffer){0};
+        const uint8_t *d = b.size >= 24 ? ipc_guest(b.addr, b.size) : NULL;
+        if (!d) return;
+        uint32_t payload = (uint32_t)d[0x14] | (uint32_t)d[0x15] << 8 | (uint32_t)d[0x16] << 16 | (uint32_t)d[0x17] << 24;
+        size_t end = 24 + (payload < b.size - 24 ? payload : b.size - 24), i = 24;
+        while (i < end) {
+            uint8_t key = d[i++];
+            uint64_t len = 0; int sh = 0;
+            while (i < end) { uint8_t c = d[i++]; len |= (uint64_t)(c & 0x7f) << sh; sh += 7; if (!(c & 0x80)) break; }
+            if (len > end - i) break;
+            if (key == 2 && len) fprintf(stderr, "[totk-lm] %.*s%s", (int)len, (const char *)d + i, d[i + len - 1] == '\n' ? "" : "\n");
+            i += len;
+        }
         return;
+    }
     case 1:   /* SetDestination(u32) */
         return;
     default: ipc_unimplemented(s, rq);

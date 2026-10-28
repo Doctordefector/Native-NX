@@ -35,7 +35,7 @@ static uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags want) {
 
 static int chunk_new(chunk_t *c, VkDeviceSize size) {
     VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
-        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+        .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT |
                  VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT};
     if (!vk_check(vk.vkCreateBuffer(vkc.device, &bi, NULL, &c->buf), "upload buffer")) return 0;
     VkMemoryRequirements req;
@@ -424,6 +424,14 @@ static uint64_t tex_handle(int stage, const vkb_tex_ref *t) {
     uint64_t h = S.tex[stage][t->slot];
     return t->separate ? (h & 0xFFFFFu) | (S.samp[stage][t->sslot] & ~(uint64_t)0xFFFFF) : h;
 }
+// [Pikmin 4] the registered texture of a buffer-texture handle (its storage is read as a texel buffer)
+static int tbuf_of(uint64_t h, tex_t *out) {
+    int id = (int)(h & 0xFFFFF), ok = 0;
+    vkb_rw_read(&g_reg_mu, LK_TEXREG);
+    if (id > 0 && id < g_ntreg && g_treg[id].valid) { *out = g_treg[id].t; ok = out->mem != NULL; }
+    vkb_rw_read_end(&g_reg_mu);
+    return ok;
+}
 static vkb_image *handle_image(uint64_t h, const view_t **view) {
     static __thread view_t views[64];
     static __thread unsigned next;
@@ -479,7 +487,7 @@ static void fixed_buffers(void) {
     for (int k = 0; k < 2; k++) {
         VkBuffer *b = k ? &g_support : &g_zero;
         VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 65536,
-                                 .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+                                 .usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                                           VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT};
         vk.vkCreateBuffer(vkc.device, &bi, NULL, b);
         VkMemoryRequirements req;
@@ -527,7 +535,7 @@ static int mirror_alloc(uint64_t addr, VkDeviceSize n, VkBuffer *buf, VkDeviceSi
     if (sl < 0) return 0;
     if (!g_mpool[sl].buf) {
         VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = MIRROR_POOL,
-            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
                      VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                      VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT};
         if (!vk_check(vk.vkCreateBuffer(vkc.device, &bi, NULL, &g_mpool[sl].buf), "mirror buffer")) return 0;
@@ -676,9 +684,10 @@ static VkDescriptorBufferInfo driver_bank(int bank, int stage) {
 
 // ---------------- descriptors ----------------
 typedef struct {
-    VkWriteDescriptorSet w[128];
-    VkDescriptorBufferInfo bi[128];
-    VkDescriptorImageInfo ii[128];
+    VkWriteDescriptorSet w[160];
+    VkDescriptorBufferInfo bi[160];
+    VkDescriptorImageInfo ii[160];
+    VkFormat tf[160];   // [Pikmin 4] uniform texel buffers: the format, reached through the write's pTexelBufferView
     int n;
 } writes_t;
 
@@ -706,6 +715,22 @@ static void put_buf(writes_t *W, VkDescriptorSet set, uint32_t binding, VkDescri
     W->bi[W->n] = info;
     W->w[W->n] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = binding,
                                          .descriptorCount = 1, .descriptorType = type, .pBufferInfo = &W->bi[W->n]};
+    W->n++;
+}
+// [Pikmin 4] a buffer texture: its range and format (descriptor buffers only: a descriptor set would need a VkBufferView,
+// so with descriptor sets the binding stays unwritten - partially bound)
+static void put_tbuf(writes_t *W, VkDescriptorSet set, uint32_t binding, VkDescriptorType type, VkDescriptorBufferInfo info, VkFormat f, int stage) {
+    /* [temporary] off unless TOTK_TBUF=1: written texel buffers still lose the device (under investigation); TOTK_TBUF=gfx
+       writes them for graphics only */
+    static int off = -1; if (off < 0) { const char *e = getenv("TOTK_TBUF"); off = !e ? 1 : !strcmp(e, "gfx") ? 2 : 0; }
+    if (!vkb_db_on() || (off && (off == 1 || stage == 5))) return;
+    static int zero = -1; if (zero < 0) zero = getenv("TOTK_TBUF_ZERO") ? atoi(getenv("TOTK_TBUF_ZERO")) : 0;   // development: bisecting
+    if (zero) { info = (VkDescriptorBufferInfo){g_zero, 0, 65536}; f = zero == 2 ? VK_FORMAT_R32_UINT : VK_FORMAT_R32G32B32A32_SFLOAT; }
+    W->bi[W->n] = info;
+    W->tf[W->n] = f;
+    W->w[W->n] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = binding, .descriptorCount = 1,
+                                         .descriptorType = type, .pBufferInfo = &W->bi[W->n],
+                                         .pTexelBufferView = (const VkBufferView *)(const void *)&W->tf[W->n]};
     W->n++;
 }
 static void put_img(writes_t *W, VkDescriptorSet set, uint32_t binding, VkDescriptorType type, VkDescriptorImageInfo info) {
@@ -910,7 +935,13 @@ static void write_stage(writes_t *W, VkDescriptorSet set, const vkb_shader *sh, 
         VkImageViewType vt = view_type_of(sh->tex[i].type);
         int readable = im && (fb_sampled(im) ? vkb_layout_is(im, VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT)
                                              : vkb_layout_is(im, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
-        VkImageView view = readable ? vkb_view(im, v, 0, (int)vt) : VK_NULL_HANDLE;
+        /* [Pikmin 4] a view that cannot have the type the shader declares (Unreal binds its 2D dummy textures to volume and
+           cube slots): a dummy of the declared type - a 2D-array view in a 3D binding loses the device on NVIDIA */
+        int fits = !im || !((vt == VK_IMAGE_VIEW_TYPE_3D && im->depth <= 1) || (vt != VK_IMAGE_VIEW_TYPE_3D && im->depth > 1) ||
+                            ((vt == VK_IMAGE_VIEW_TYPE_CUBE || vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY) && im->layers < 6));
+        if (!fits) { static int said; if (said++ < 8) VLOG("[temporary] shader %.12s: texture %llu (%ux%ux%u, %u layers) does not fit a view of type %d: a dummy",
+                                                          sh->key ? sh->key : "?", (unsigned long long)im->serial, im->width, im->height, im->depth, im->layers, (int)vt); }
+        VkImageView view = readable && fits ? vkb_view(im, v, 0, (int)vt) : VK_NULL_HANDLE;
         if (!(h & 0xFFFFF)) vkb_audit(A_TEX_UNBOUND, sh->key);
         else if (!im) vkb_audit(A_TEX_NO_IMAGE, sh->key);
         else if (!view) vkb_audit(A_TEX_NOT_READY, sh->key);
@@ -926,6 +957,48 @@ static void write_stage(writes_t *W, VkDescriptorSet set, const vkb_shader *sh, 
         if (!view) vkb_audit(A_IMG_MISSING, sh->key);
         VkDescriptorImageInfo info = {VK_NULL_HANDLE, view ? view : dummy_view(VK_IMAGE_VIEW_TYPE_2D), VK_IMAGE_LAYOUT_GENERAL};
         put_img(W, set, base + VKB_B_IMG + (uint32_t)i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, info);
+    }
+    for (int i = 0; i < sh->ntbuf; i++) {   // [Pikmin 4] buffer textures: the registered texture's storage as a texel buffer
+        tex_t t;
+        VkDescriptorBufferInfo bi = {0};
+        VkFormat f = VK_FORMAT_UNDEFINED;
+        if (tbuf_of(tex_handle(stage, &sh->tbuf[i]), &t)) {
+            int bw, bh, bpb = nvn_fmt_bpb(t.d.format, &bw, &bh);
+            f = vkb_format(t.d.format, NULL, NULL);
+            if (bpb && f != VK_FORMAT_UNDEFINED)
+                bi = guest_range((uint64_t)(uintptr_t)t.mem, (uint64_t)t.d.width * (uint64_t)bpb, vkc.props.limits.minTexelBufferOffsetAlignment, 1);
+        }
+        if (!bi.buffer || bi.buffer == g_zero) {
+            static int said;
+            if (said++ < 8) VLOG("[temporary] shader %.12s: buffer texture %d unresolved (handle %#llx): zeros", sh->key ? sh->key : "?", i,
+                                 (unsigned long long)tex_handle(stage, &sh->tbuf[i]));
+            bi = (VkDescriptorBufferInfo){g_zero, 0, 256};
+            f = VK_FORMAT_R32G32B32A32_SFLOAT;
+        }
+        { static _Atomic int said; if (said++ < 12) VLOG("[tbuf] shader %.12s: nvn format %#x -> vk %d, range %llu, descriptor %zu bytes (robust %zu)", sh->key ? sh->key : "?",
+              bi.buffer == g_zero ? 0 : t.d.format, (int)f, (unsigned long long)bi.range, (size_t)vkc.db.uniformTexelBufferDescriptorSize, (size_t)vkc.db.robustUniformTexelBufferDescriptorSize); }
+        put_tbuf(W, set, base + VKB_B_TBUF + (uint32_t)i, VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, bi, f, stage);
+    }
+    for (int i = 0; i < sh->nstbuf; i++) {   // [Pikmin 4] buffer images: written in place (no copy: the writes must land)
+        tex_t t;
+        VkDescriptorBufferInfo bi = {0};
+        VkFormat f = VK_FORMAT_UNDEFINED;
+        if (tbuf_of(S.img[stage][sh->stbuf[i].slot], &t)) {
+            int bw, bh, bpb = nvn_fmt_bpb(t.d.format, &bw, &bh);
+            f = vkb_format(t.d.format, NULL, NULL);
+            if (bpb && f != VK_FORMAT_UNDEFINED)
+                bi = guest_range((uint64_t)(uintptr_t)t.mem, (uint64_t)t.d.width * (uint64_t)bpb, vkc.props.limits.minTexelBufferOffsetAlignment, 0);
+        }
+        if (!bi.buffer || bi.buffer == g_zero) {
+            static int said;
+            if (said++ < 8) VLOG("[temporary] shader %.12s: buffer image %d unresolved (handle %#llx): a scratch buffer", sh->key ? sh->key : "?", i,
+                                 (unsigned long long)S.img[stage][sh->stbuf[i].slot]);
+            VkBuffer rb; VkDeviceSize ro;   // writes go to scratch memory, reads see zeros
+            memset(vkb_ring_alloc(4096, vkc.props.limits.minTexelBufferOffsetAlignment, &rb, &ro), 0, 4096);
+            bi = (VkDescriptorBufferInfo){rb, ro, 4096};
+            f = VK_FORMAT_R32_UINT;
+        }
+        put_tbuf(W, set, base + VKB_B_STBUF + (uint32_t)i, VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, bi, f, stage);
     }
 }
 
@@ -950,6 +1023,7 @@ static VkDescriptorSet resolve_set(writes_t *W, int compute) {
             hmix(&h1, &h2, (uint64_t)(uintptr_t)w->pBufferInfo->buffer);
             hmix(&h1, &h2, w->pBufferInfo->offset);
             hmix(&h1, &h2, w->pBufferInfo->range);
+            if (w->pTexelBufferView) hmix(&h1, &h2, (uint64_t)*(const VkFormat *)(const void *)w->pTexelBufferView);
         } else {
             hmix(&h1, &h2, (uint64_t)(uintptr_t)w->pImageInfo->sampler);
             hmix(&h1, &h2, (uint64_t)(uintptr_t)w->pImageInfo->imageView);
@@ -1486,7 +1560,8 @@ static void trace_resources(const vkb_shader *sh, int stage) {
         n += im ? snprintf(line + n, sizeof line - n, " t%d=%llu/%#x/%ux%u%s@%p#%04llx", sh->tex[i].slot, (unsigned long long)im->serial, im->d.format,
                            im->width, im->height, im->gpu_written ? "/gpu" : "", (const void *)im->storage,
                            (unsigned long long)((uintptr_t)im->img & 0xffff))
-                : snprintf(line + n, sizeof line - n, " t%d=-", sh->tex[i].slot);
+                : snprintf(line + n, sizeof line - n, " t%d=-(h %#llx%s)", sh->tex[i].slot, (unsigned long long)tex_handle(stage, &sh->tex[i]),
+                           sh->tex[i].separate ? " sep" : "");
         int sid = (int)(tex_handle(stage, &sh->tex[i]) >> 20) & 0xFFF;
         vkb_rw_read(&g_reg_mu, LK_TEXREG);
         if (sid < g_nsreg && g_sreg[sid].valid) {

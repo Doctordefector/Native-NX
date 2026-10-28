@@ -29,12 +29,12 @@ int vkb_db_on(void) {
 }
 
 // ---- the layouts: size and the offset of every binding
-static VkDeviceSize g_size[2], g_off[2][128];
+static VkDeviceSize g_size[2], g_off[2][2 * VKB_STAGE_BINDINGS];
 void vkb_db_layouts(const VkDescriptorSetLayout layout[2]) {
     for (int c = 0; c < 2; c++) {
         vk.vkGetDescriptorSetLayoutSizeEXT(vkc.device, layout[c], &g_size[c]);
-        for (uint32_t b = 0; b < 128; b++) {
-            int used = b % VKB_STAGE_BINDINGS < VKB_B_IMG + VKB_NIMG && (!c || b < VKB_STAGE_BINDINGS);   // compute: one stage
+        for (uint32_t b = 0; b < 2 * VKB_STAGE_BINDINGS; b++) {
+            int used = b % VKB_STAGE_BINDINGS < VKB_B_STBUF + VKB_NSTBUF && (!c || b < VKB_STAGE_BINDINGS);   // compute: one stage
             if (used) vk.vkGetDescriptorSetLayoutBindingOffsetEXT(vkc.device, layout[c], b, &g_off[c][b]);
         }
     }
@@ -121,11 +121,16 @@ static size_t type_size(VkDescriptorType t) {
     case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: return vkc.db.storageBufferDescriptorSize;
     case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER: return vkc.db.combinedImageSamplerDescriptorSize;
     case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: return vkc.db.storageImageDescriptorSize;
+    case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER: return vkc.db.uniformTexelBufferDescriptorSize;   // [Pikmin 4]
+    case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER: return vkc.db.storageTexelBufferDescriptorSize;
     default: return 0;
     }
 }
 static const uint8_t *descriptor(const VkWriteDescriptorSet *w, uint64_t rec, size_t *len) {
-    uint64_t k0 = (uint64_t)w->descriptorType, k1, k2, k3;
+    /* [Pikmin 4] a uniform texel buffer write carries its buffer range in pBufferInfo and its VkFormat behind
+       pTexelBufferView (vkb_draw.c put_tbuf): descriptor buffers take an address, a range and a format, no view */
+    VkFormat tfmt = w->pTexelBufferView ? *(const VkFormat *)(const void *)w->pTexelBufferView : VK_FORMAT_UNDEFINED;
+    uint64_t k0 = (uint64_t)w->descriptorType | (uint64_t)tfmt << 32, k1, k2, k3;
     if (w->pBufferInfo) { k1 = (uint64_t)(uintptr_t)w->pBufferInfo->buffer; k2 = w->pBufferInfo->offset; k3 = w->pBufferInfo->range; }
     else { k1 = (uint64_t)(uintptr_t)w->pImageInfo->sampler; k2 = (uint64_t)(uintptr_t)w->pImageInfo->imageView; k3 = (uint64_t)w->pImageInfo->imageLayout; }
     if (!g_cache && !(g_cache = calloc(CACHE, sizeof *g_cache))) die("descriptor cache");
@@ -146,7 +151,11 @@ static const uint8_t *descriptor(const VkWriteDescriptorSet *w, uint64_t rec, si
     if (w->pBufferInfo) {
         ai.address = buffer_address(w->pBufferInfo->buffer, rec) + w->pBufferInfo->offset;
         ai.range = w->pBufferInfo->range;
-        if (w->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) gi.data.pUniformBuffer = &ai; else gi.data.pStorageBuffer = &ai;
+        ai.format = tfmt;
+        if (w->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) gi.data.pUniformBuffer = &ai;
+        else if (w->descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER) gi.data.pUniformTexelBuffer = &ai;
+        else if (w->descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER) gi.data.pStorageTexelBuffer = &ai;
+        else gi.data.pStorageBuffer = &ai;
     } else if (w->descriptorType == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) gi.data.pCombinedImageSampler = w->pImageInfo;
     else gi.data.pStorageImage = w->pImageInfo;
     vk.vkGetDescriptorEXT(vkc.device, &gi, n, out);

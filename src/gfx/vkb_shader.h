@@ -4,14 +4,16 @@
 
 #include "vkb.h"
 
-// Universal layout: per stage VKB_STAGE_BINDINGS bindings of set 0 (vertex from 0, fragment from 64; compute: own layout).
+// Universal layout: per stage VKB_STAGE_BINDINGS bindings of set 0 (vertex from 0, fragment from 68; compute: own layout).
 enum {
-    VKB_STAGE_BINDINGS = 64,
+    VKB_STAGE_BINDINGS = 68,
     VKB_B_SUPPORT = 0,                   // Ryujinx support buffer
     VKB_B_CBUF = 1, VKB_NCBUF = 17,      // c0..c16 at +1..17
     VKB_B_SBUF = 18, VKB_NSBUF = 16,     // storage buffers in the shader's order
     VKB_B_TEX = 34, VKB_NTEX = 24,       // combined textures in the shader's order
     VKB_B_IMG = 58, VKB_NIMG = 4,        // images in the shader's order
+    VKB_B_TBUF = 62, VKB_NTBUF = 2,      // [Pikmin 4] buffer textures (uniform texel buffers) in the shader's order
+    VKB_B_STBUF = 64, VKB_NSTBUF = 4,    // [Pikmin 4] buffer images (storage texel buffers: Unreal's RWBuffer) in the shader's order
 };
 
 enum { VKB_SB_TABLE, VKB_SB_UBO, VKB_SB_UBO_PTR };
@@ -36,6 +38,8 @@ typedef struct {
     struct { uint8_t slot, kind, write, read; uint16_t off; } sbuf[VKB_NSBUF]; int nsbuf;   // write / read: stores to / loads from it
     vkb_tex_ref tex[VKB_NTEX]; int ntex; // binding +34+i
     vkb_tex_ref img[VKB_NIMG]; int nimg; // binding +58+i
+    vkb_tex_ref tbuf[VKB_NTBUF]; int ntbuf; // [Pikmin 4] binding +62+i: buffer textures (Ryujinx SamplerType.TextureBuffer)
+    vkb_tex_ref stbuf[VKB_NSTBUF]; int nstbuf; // [Pikmin 4] binding +64+i: buffer images
     uint32_t frag_outputs;               // colour outputs written (bit per target)
     int stores;                          // writes storage buffers or images (later work must wait for it)
     int unsupported;                     // a resource outside the layout: draws with it are skipped
