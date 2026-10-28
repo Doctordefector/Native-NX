@@ -310,7 +310,10 @@ NVN(nvnTextureBuilderSetSize3D, void, NVNtextureBuilder *b, int w, int h, int d)
 NVN(nvnTextureBuilderSetLevels, void, NVNtextureBuilder *b, int v) { TB(b)->d.levels = v; }
 NVN(nvnTextureBuilderSetFormat, void, NVNtextureBuilder *b, NVNformat f) { TB(b)->d.format = f; }
 // This adapter currently samples the depth plane; stencil-only sampling stops.
-NVN(nvnTextureBuilderSetDepthStencilMode, void, NVNtextureBuilder *b,NVNtextureDepthStencilMode mode){(void)b;if(mode!=NVN_TEXTURE_DEPTH_STENCIL_MODE_DEPTH)die("stencil-plane texture sampling is not implemented");}
+/* [Pikmin 4] Unreal aliases its depth buffer with a stencil-mode texture to read stencil in shaders. TODO(port): carry
+   the mode to the Vulkan view (stencil aspect, read as uint). Until then such a texture samples depth (logged once). */
+NVN(nvnTextureBuilderSetDepthStencilMode, void, NVNtextureBuilder *b,NVNtextureDepthStencilMode mode){(void)b;
+    static int said; if(mode!=NVN_TEXTURE_DEPTH_STENCIL_MODE_DEPTH && !said++) LOG("[nvn] [temporary] stencil-mode texture: sampled as depth");}
 NVN(nvnTextureBuilderSetSwizzle, void, NVNtextureBuilder *b,NVNtextureSwizzle r,NVNtextureSwizzle g,NVNtextureSwizzle blue,NVNtextureSwizzle a){if((unsigned)r>5||(unsigned)g>5||(unsigned)blue>5||(unsigned)a>5)die("invalid NVN texture swizzle");TB(b)->d.swizzle_r=r;TB(b)->d.swizzle_g=g;TB(b)->d.swizzle_b=blue;TB(b)->d.swizzle_a=a;}
 NVN(nvnTextureBuilderSetSamples, void, NVNtextureBuilder *b, int s) { TB(b)->d.samples = s; }
 NVN(nvnTextureBuilderSetStride, void, NVNtextureBuilder *b, ptrdiff_t s) { TB(b)->d.stride = (uint32_t)s; }
@@ -586,11 +589,34 @@ static int sync_chain_left(int k) {
 }
 NVN(nvnQueueFenceSync, void, NVNqueue *q, NVNsync *s, NVNsyncCondition c, int f) { (void)q; (void)c; (void)f; int tok; uint64_t v = fence_now(&tok); ((sync_t *)s)->fenced = tok ? 5 : 1; ((sync_t *)s)->fence = v;
     if (sync_chain_left(0)) { char w[96]; snprintf(w, sizeof w, "FenceSync sync=%p fence=%llu cond=%d flags=%d", (void *)s, (unsigned long long)v, (int)c, f); guest_chain(w); } }
-/* [Pikmin 4] Unreal also fences inside command buffers. TODO(port): record the fence in the command stream; for now it
-   is the end of the next submit (Unreal's RHI submits the buffer it fenced next), which can only release later than
-   the recorded point, not earlier. Synchronous replay: the fence after the next Metal/Vulkan submit. */
-NVN(nvnCommandBufferFenceSync, void, NVNcommandBuffer *cb, NVNsync *s, NVNsyncCondition c, int f) { (void)cb; (void)c; (void)f;
-    int tok; uint64_t v = fence_now(&tok); ((sync_t *)s)->fenced = tok ? 5 : 1; ((sync_t *)s)->fence = v + 1; }
+/* [Pikmin 4] Unreal also fences inside command buffers. The sync is parked unsignaled on the recorder, moves to the
+   handle at EndRecording, and resolves at the submit that carries that handle: to that submit's token (translation
+   thread) or the fence it ended with (synchronous replay). A fence in a recording that is never submitted never
+   signals, as on the console. The fence position inside the handle is not used: the whole submit must finish. */
+typedef struct { const void *key; NVNsync *s; } cb_fence;
+static cb_fence g_cbf[4096];
+static int g_ncbf;
+static pthread_mutex_t g_cbf_mu = PTHREAD_MUTEX_INITIALIZER;
+static void cbf_rekey(const void *from, const void *to) {
+    pthread_mutex_lock(&g_cbf_mu);
+    for (int i = 0; i < g_ncbf; i++) if (g_cbf[i].key == from) g_cbf[i].key = to;
+    pthread_mutex_unlock(&g_cbf_mu);
+}
+static void cbf_resolve(const void *key, int fenced, uint64_t v) {
+    pthread_mutex_lock(&g_cbf_mu);
+    for (int i = 0; i < g_ncbf;)
+        if (g_cbf[i].key == key) { ((sync_t *)g_cbf[i].s)->fence = v; ((sync_t *)g_cbf[i].s)->fenced = fenced; g_cbf[i] = g_cbf[--g_ncbf]; }
+        else i++;
+    pthread_mutex_unlock(&g_cbf_mu);
+}
+NVN(nvnCommandBufferFenceSync, void, NVNcommandBuffer *cb, NVNsync *s, NVNsyncCondition c, int f) { (void)c; (void)f;
+    pthread_mutex_lock(&g_cbf_mu);
+    for (int i = 0; i < g_ncbf; i++) if (g_cbf[i].s == s) { g_cbf[i] = g_cbf[--g_ncbf]; break; }   /* fenced again: the newest wins */
+    if (g_ncbf == (int)(sizeof g_cbf / sizeof *g_cbf)) die("command-buffer fence table full");
+    g_cbf[g_ncbf++] = (cb_fence){cb, s};
+    ((sync_t *)s)->fenced = 0;
+    pthread_mutex_unlock(&g_cbf_mu);
+}
 // 没围栏过的同步对象按真机行为等到超时；已围栏的只在 GPU 真正完成到该栅栏值后放行
 // A sync object that was never fenced waits until timeout, as on a real device; a fenced one is released only after the GPU has actually completed up to that fence value
 // TOTK_SYNC_LOG=1: CPU waits by kind (0 fence sync, 1 window-acquire sync): calls, calls that had to block, blocked time,
@@ -851,6 +877,10 @@ static void copy_drop(copy_bucket *b, uint32_t i, int by_token) {   /* g_copy_mu
 }
 static void release_copies(uintptr_t lo, uintptr_t hi) {
     if (hi <= lo) return;
+    /* [Pikmin 4] Unreal adds the same control memory to the next command buffer right after each submit, which frees the
+       copies recorded there while the translation thread may not have replayed them yet: let it finish first. TODO(port):
+       wait only for the submits that used a copy in [lo, hi) (copy_prefix.used_at) instead of the whole queue. */
+    x_drain();
     pthread_mutex_lock(&g_copy_mu);
     for (uintptr_t pg = lo >> COPY_PAGE_SHIFT; pg <= (hi - 1) >> COPY_PAGE_SHIFT; pg++) {
         copy_bucket *b = cbk_get(pg, 0); if (!b) continue;
@@ -933,6 +963,7 @@ NVN(nvnCommandBufferEndRecording, NVNcommandHandle, NVNcommandBuffer *c) {
     if (cmdlog_env()) LOG("[cmd] EndRecording cb=%p recorded=%p copy=%p ctl=%p", (void *)c, (void *)o->seg, (void *)copy, o->ctl);
     if (totk_life_on() && totk_life_cb_take(c)) { totk_life_log("end cb=%p handle=%p", (void *)c, (void *)copy); totk_life_handle_add((uint64_t)(uintptr_t)copy); }
     if (getenv("TOTK_CHAIN_LOG")) { static int n; if (n++ < 200) guest_chain("EndRecording"); }
+    cbf_rekey(c, copy);   /* [Pikmin 4] command-buffer fences travel with the handle */
     return (NVNcommandHandle)copy;
 }
 NVN(nvnCommandBufferIsRecording, NVNboolean, const NVNcommandBuffer *c) { return ((const cmd_t *)c)->recording != 0; }
@@ -2012,10 +2043,12 @@ NVN(nvnQueueSubmitCommands, void, NVNqueue *q, int n, const NVNcommandHandle *h)
         memcpy(j.h, h, sizeof(uint64_t) * (size_t)n);
         j.ucap = mtl_sub_capture_ubos((const uint64_t *)h, n);
         x_push(&j);
+        for (int i = 0; i < n; i++) cbf_resolve((const void *)(uintptr_t)h[i], 5, j.sub);   /* [Pikmin 4] */
         totk_tl(TL_SUB_OUT, 1, 0);
         return;
     }
     submit_exec(n, (const uint64_t *)h, NULL);
+    { uint64_t v = mtl_last_fence(); for (int i = 0; i < n; i++) cbf_resolve((const void *)(uintptr_t)h[i], 1, v); }   /* [Pikmin 4] */
     totk_tl(TL_SUB_OUT, 0, 0);
 }
 static void submit_exec(int n, const uint64_t *h, void *ucap) {
@@ -2097,6 +2130,7 @@ static void nvn_nop(void) {}
 static const char *const g_nops[] = {
     "nvnCommandBufferSetPatchSize",
     "nvnCommandBufferWaitSync",
+    "nvnQueueWaitSync",   // [Pikmin 4] same as the command-buffer wait: one in-order queue
     "nvnCommandBufferSetShaderScratchMemory",
     "nvnCommandBufferWaitEvent",
     "nvnWindowFinalize",
