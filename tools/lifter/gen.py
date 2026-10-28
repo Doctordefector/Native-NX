@@ -114,6 +114,7 @@ class Module:
 
     def jump_table(self, br_pc, entry, end):
         """Resolve `br xN` targets from a bounds-checked jump table, or None."""
+        self._scan_bounded = None
         r = self._jump_table_fallthrough(br_pc, entry, end)
         if r is None:
             r = self._jump_table_taken(br_pc, entry, end)
@@ -122,9 +123,15 @@ class Module:
         # every index gives the same target (a table read at a fixed scratch address). Such a single-target result is
         # replaced by the entries read from the image. (Adding the scanned entries to every table instead put
         # trailing data that looks like entries into 1619 of main's 2367 tables.)
-        if r is not None and len(set(r)) > 1:
-            return r
         s = self._jump_table_scan(br_pc, entry, end)
+        # [Pikmin 4] the emulation reads the table through registers it may not have set (main 0x8018f66e0: the table
+        # pointer is an argument copy, so it read other bytes and gave 5 wrong targets); the table read from the image
+        # is then kept as well (an extra label is harmless, a missing one ends the game with "no function at")
+        if r is not None and len(set(r)) > 1:
+            if s is not None and self._scan_bounded and set(r) != self._scan_bounded:
+                self.stats['jumptables_emulation_disagrees'] += 1
+                return sorted(set(r) | set(s))
+            return r
         if r is not None and s is not None:
             self.stats['jumptables_single_target_rescanned'] += 1
             return sorted(set(r) | set(s))
@@ -208,6 +215,13 @@ class Module:
                     return j
             return None
         ti = writer_before(table_reg, x)
+        # [Pikmin 4] the table address kept in another register and copied (main 0x8018f66a8: `mov x20, x6`, x6 loaded
+        # with adrp/add elsewhere in the function): the copy's source is the register to trace
+        for _ in range(4):
+            if ti is None or ti.mnemonic != 'mov' or len(ti.operands) != 2 or ti.operands[1].type != capstone.arm64.ARM64_OP_REG:
+                break
+            table_reg = ti.reg_name(ti.operands[1].reg)
+            ti = writer_before(table_reg, ti.address)
         if ti is None or ti.mnemonic != 'add' or len(ti.operands) != 3 or ti.operands[2].type != capstone.arm64.ARM64_OP_IMM \
                 or ti.reg_name(ti.operands[1].reg) != table_reg:
             return None
@@ -216,7 +230,20 @@ class Module:
             return None
         table = pi.operands[1].imm + ti.operands[2].imm
         lo, hi = self.base, self.base + len(self.nso.image)
-        targets = set()
+        # [Pikmin 4] the bounds check on the index register near the load (`cmp wI, #n; b.hi`): the table's n + 1 entries
+        # (self._scan_bounded; jump_table compares them with the emulation's). The result stays the scan of up to 4096.
+        idx_w = i.reg_name(mem.mem.index).replace('x', 'w')
+        count, self._scan_bounded = None, None
+        for y in window:
+            if y >= x:
+                continue
+            j = insns[y]
+            if j.mnemonic == 'cmp' and len(j.operands) == 2 and j.operands[1].type == capstone.arm64.ARM64_OP_IMM                     and j.reg_name(j.operands[0].reg).replace('x', 'w') == idx_w:
+                nxt = insns.get(y + 4)
+                if nxt is not None and nxt.mnemonic in ('b.hi', 'b.hs'):
+                    count = j.operands[1].imm + (1 if nxt.mnemonic == 'b.hi' else 0)
+                break
+        targets, bounded = set(), set()
         for k in range(4096):
             at = table + k * size
             if at + size > hi or at < lo:
@@ -226,6 +253,10 @@ class Module:
             if not (entry <= t < end) or t % 4:
                 break
             targets.add(t)
+            if count is not None and k < count:
+                bounded.add(t)
+        if bounded:
+            self._scan_bounded = bounded
         if len(targets) < 2:
             return None
         self.stats['jumptables_scanned'] += 1

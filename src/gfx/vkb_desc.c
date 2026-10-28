@@ -32,11 +32,11 @@ int vkb_db_on(void) {
 }
 
 // ---- the layouts: size and the offset of every binding
-static VkDeviceSize g_size[2], g_off[2][2 * VKB_STAGE_BINDINGS];
+static VkDeviceSize g_size[2], g_off[2][VKB_GFX_STAGES * VKB_STAGE_BINDINGS];
 void vkb_db_layouts(const VkDescriptorSetLayout layout[2]) {
     for (int c = 0; c < 2; c++) {
         vk.vkGetDescriptorSetLayoutSizeEXT(vkc.device, layout[c], &g_size[c]);
-        for (uint32_t b = 0; b < 2 * VKB_STAGE_BINDINGS; b++) {
+        for (uint32_t b = 0; b < VKB_GFX_STAGES * VKB_STAGE_BINDINGS; b++) {
             int used = b % VKB_STAGE_BINDINGS < VKB_B_STBUF + VKB_NSTBUF && (!c || b < VKB_STAGE_BINDINGS);   // compute: one stage
             if (used) vk.vkGetDescriptorSetLayoutBindingOffsetEXT(vkc.device, layout[c], b, &g_off[c][b]);
         }

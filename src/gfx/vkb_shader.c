@@ -6,7 +6,7 @@
 //  - [temporary] The translation is the default variant from the translator comparison (work/shaders/v143/ryujinx: every
 //    texture 2D-typed by its own reflection, attributes and outputs float). The runtime translation service with
 //    variants per bound state (MacNativeGames' totk_shader_rt) replaces it before the open world.
-//  - Descriptors: one universal layout. Each stage owns 68 bindings of set 0 (vertex 0-67, fragment 68-135; compute its
+//  - Descriptors: one universal layout. Each stage owns 76 bindings of set 0 (vertex 0-75, fragment 76-151, geometry 152-227; compute its
 //    own layout): +0 Ryujinx support buffer, +1..17 constant buffers c0-c16, +18..33 storage buffers, +34..57 combined
 //    textures, +58..61 images. The translator numbers bindings densely per shader; they are rewritten in the SPIR-V
 //    when it is loaded, so any vertex shader combines with any fragment shader under one pipeline layout.
@@ -30,11 +30,11 @@ static VkPipelineLayout g_playout[2];
 
 static void make_layouts(void) {
     for (int compute = 0; compute < 2; compute++) {
-        VkDescriptorSetLayoutBinding b[2 * VKB_STAGE_BINDINGS];
-        VkDescriptorBindingFlags fl[2 * VKB_STAGE_BINDINGS];
+        VkDescriptorSetLayoutBinding b[VKB_GFX_STAGES * VKB_STAGE_BINDINGS];
+        VkDescriptorBindingFlags fl[VKB_GFX_STAGES * VKB_STAGE_BINDINGS];
         uint32_t n = 0;
-        for (int st = 0; st < (compute ? 1 : 2); st++) {
-            VkShaderStageFlags sf = compute ? VK_SHADER_STAGE_COMPUTE_BIT : st ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT;
+        for (int st = 0; st < (compute ? 1 : VKB_GFX_STAGES); st++) {
+            VkShaderStageFlags sf = compute ? VK_SHADER_STAGE_COMPUTE_BIT : st == 2 ? VK_SHADER_STAGE_GEOMETRY_BIT : st ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_VERTEX_BIT;
             uint32_t base = (uint32_t)st * VKB_STAGE_BINDINGS;
             struct { uint32_t off, count; VkDescriptorType type; } r[] = {
                 {VKB_B_SUPPORT, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER}, {VKB_B_CBUF, VKB_NCBUF, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER},
@@ -273,7 +273,8 @@ static int fix_size_reads(uint32_t *w, size_t n) {
 static VkResult create_object(VkShaderStageFlagBits stage, const uint32_t *spv, size_t bytes, VkShaderEXT *obj) {
     VkDescriptorSetLayout layout = vkb_set_layout(stage == VK_SHADER_STAGE_COMPUTE_BIT);
     VkShaderCreateInfoEXT ci = {VK_STRUCTURE_TYPE_SHADER_CREATE_INFO_EXT, .stage = stage,
-        .nextStage = stage == VK_SHADER_STAGE_VERTEX_BIT ? VK_SHADER_STAGE_FRAGMENT_BIT : 0,
+        .nextStage = stage == VK_SHADER_STAGE_VERTEX_BIT ? VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_GEOMETRY_BIT
+                   : stage == VK_SHADER_STAGE_GEOMETRY_BIT ? VK_SHADER_STAGE_FRAGMENT_BIT : 0,
         .codeType = VK_SHADER_CODE_TYPE_SPIRV_EXT, .codeSize = bytes, .pCode = spv, .pName = "main",
         .setLayoutCount = 1, .pSetLayouts = &layout};
     return vk.vkCreateShadersEXT(vkc.device, 1, &ci, NULL, obj);
@@ -328,7 +329,7 @@ static int load(vkb_shader *s, const char *key, int nvn_stage) {
     uint32_t *spv = (uint32_t *)read_file(path, &nspv);
     if (!j || !spv || nspv < 20 || (nspv & 3) || spv[0] != 0x07230203) { free(j); free(spv); return 0; }
     s->stage = nvn_stage;
-    uint32_t base = nvn_stage == 1 ? VKB_STAGE_BINDINGS : 0;
+    uint32_t base = vkb_stage_base(nvn_stage);
     uint32_t remap[256];   // translator binding -> universal binding (UINT32_MAX: unknown)
     for (int i = 0; i < 256; i++) remap[i] = UINT32_MAX;
     remap[0] = base + VKB_B_SUPPORT;
@@ -427,7 +428,8 @@ static int load(vkb_shader *s, const char *key, int nvn_stage) {
         }
         i += wc;
     }
-    VkShaderStageFlagBits stage = nvn_stage == 0 ? VK_SHADER_STAGE_VERTEX_BIT : nvn_stage == 1 ? VK_SHADER_STAGE_FRAGMENT_BIT : VK_SHADER_STAGE_COMPUTE_BIT;
+    VkShaderStageFlagBits stage = nvn_stage == 0 ? VK_SHADER_STAGE_VERTEX_BIT : nvn_stage == 1 ? VK_SHADER_STAGE_FRAGMENT_BIT
+                                : nvn_stage == 2 ? VK_SHADER_STAGE_GEOMETRY_BIT : VK_SHADER_STAGE_COMPUTE_BIT;
     if (getenv("TOTK_SPV_DUMP")) {   // [Pikmin 4] development: every module as loaded (bindings and fixes applied), for spirv-val
         char dp[1024];
         snprintf(dp, sizeof dp, "%s/%.16s.spv", getenv("TOTK_SPV_DUMP"), key);
@@ -550,7 +552,7 @@ const vkb_shader *vkb_shader_get(const NVNshaderData *sd) {
     uint32_t length, stage;
     memcpy(&length, control + 0x704, 4);
     memcpy(&stage, control + 0x714, 4);
-    if (!length || length > (16u << 20) || (stage != 0 && stage != 1 && stage != 5)) {
+    if (!length || length > (16u << 20) || (stage != 0 && stage != 1 && stage != 2 && stage != 5)) {   // [Pikmin 4] 2: geometry (Unreal's volume-texture passes)
         if (atomic_fetch_add(&said_bad, 1) < 8) VLOG("shader: unsupported stage %u or length %u", stage, length);
         return NULL;
     }

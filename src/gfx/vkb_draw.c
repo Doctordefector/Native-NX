@@ -687,11 +687,11 @@ static VkDescriptorBufferInfo driver_bank(int bank, int stage) {
 
 // ---------------- descriptors ----------------
 typedef struct {
-    VkWriteDescriptorSet w[160];
-    VkDescriptorBufferInfo bi[160];
-    VkDescriptorImageInfo ii[160];
-    VkFormat tf[160];   // [Pikmin 4] uniform texel buffers: the format, reached through the write's pTexelBufferView (descriptor buffers)
-    VkBufferView bv[160];   // [Pikmin 4] ... or the view (descriptor sets)
+    VkWriteDescriptorSet w[240];   // [Pikmin 4] vertex, fragment and geometry stages
+    VkDescriptorBufferInfo bi[240];
+    VkDescriptorImageInfo ii[240];
+    VkFormat tf[240];   // [Pikmin 4] uniform texel buffers: the format, reached through the write's pTexelBufferView (descriptor buffers)
+    VkBufferView bv[240];   // [Pikmin 4] ... or the view (descriptor sets)
     int n;
 } writes_t;
 
@@ -915,7 +915,7 @@ static void mirrors_prepare_fixed(int indexed, const p_draw_idx *di) {
 }
 
 static void write_stage(writes_t *W, VkDescriptorSet set, const vkb_shader *sh, int stage) {
-    uint32_t base = stage == 1 ? VKB_STAGE_BINDINGS : 0;
+    uint32_t base = vkb_stage_base(stage);
     VkDeviceSize ua = vkc.props.limits.minUniformBufferOffsetAlignment, sa = vkc.props.limits.minStorageBufferOffsetAlignment;
     g_akey = sh->key;
     put_buf(W, set, base + VKB_B_SUPPORT, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, (VkDescriptorBufferInfo){g_support, 0, 1392});
@@ -1594,7 +1594,7 @@ void vkb_gprof_report(void) {
 // What a traced shader reads and writes: textures, images (serial, format, size) and storage buffers (address, size).
 static void trace_resources(const vkb_shader *sh, int stage) {
     char line[1024];
-    int n = snprintf(line, sizeof line, "[draw]   %s %.12s:", stage == 0 ? "vs" : stage == 1 ? "fs" : "cs", sh->key ? sh->key : "?");
+    int n = snprintf(line, sizeof line, "[draw]   %s %.12s:", stage == 0 ? "vs" : stage == 1 ? "fs" : stage == 2 ? "gs" : "cs", sh->key ? sh->key : "?");
     for (int i = 0; i < sh->ntex && n < 900; i++) {
         const view_t *v = NULL;
         vkb_image *im = handle_image(tex_handle(stage, &sh->tex[i]), &v);
@@ -1737,6 +1737,7 @@ void vkb_draw(const uint8_t *a, int indexed) {
         }
         if (S.sh[0]) trace_resources(S.sh[0], 0);
         if (S.sh[1]) trace_resources(S.sh[1], 1);
+        if (S.sh[2]) trace_resources(S.sh[2], 2);
     }
     if (!resolve_program() || !S.sh[0]) {
         { /* [Pikmin 4] diagnostic: why a draw has no program */
@@ -1832,6 +1833,7 @@ void vkb_draw(const uint8_t *a, int indexed) {
     W->n = 0;
     write_stage(W, VK_NULL_HANDLE, vs, 0);
     if (fs) write_stage(W, VK_NULL_HANDLE, fs, 1);
+    if (S.sh[2]) write_stage(W, VK_NULL_HANDLE, S.sh[2], 2);   // [Pikmin 4] geometry
     bind_set(cb, resolve_set(W, 0), 0);
     VkShaderStageFlagBits stages[5] = {VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT, VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT,
                                        VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT, VK_SHADER_STAGE_GEOMETRY_BIT};
@@ -1842,7 +1844,7 @@ void vkb_draw(const uint8_t *a, int indexed) {
     if (fs && (fs->in_mask & ~vs->out_mask)) vkb_audit(A_FS_INPUT_UNWRITTEN, fs->key);
     if (S.has_ms && S.ms.enable && S.ms.samples > 1) vkb_audit(A_MULTISAMPLE, fs ? fs->key : vs->key);
     if (vkb_render_suppressed()) vkb_audit(A_RENDER_DISABLED, fs ? fs->key : vs->key);
-    VkShaderEXT objs[5] = {vobj, fs ? fs->obj : VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkShaderEXT objs[5] = {vobj, fs ? fs->obj : VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE, S.sh[2] ? S.sh[2]->obj : VK_NULL_HANDLE};
     if (dyn(D_SHADERS, objs, sizeof objs)) vk.vkCmdBindShadersEXT(cb, 5, stages, objs);
     set_dynamic_state(cb, vkb_rt_count(), vkb_rt_extent(), topo);
     if (vkc.has_feedback_loop) {   // required state with shader objects once the feature is enabled

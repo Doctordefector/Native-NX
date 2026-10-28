@@ -4,18 +4,21 @@
 
 #include "vkb.h"
 
-// Universal layout: per stage VKB_STAGE_BINDINGS bindings of set 0 (vertex from 0, fragment from 68; compute: own layout).
+// Universal layout: per stage VKB_STAGE_BINDINGS bindings of set 0 (vertex from 0, fragment from 76, [Pikmin 4] geometry
+// from 152; compute: own layout).
 enum {
-    VKB_STAGE_BINDINGS = 68,
+    VKB_STAGE_BINDINGS = 76, VKB_GFX_STAGES = 3,
     VKB_B_SUPPORT = 0,                   // Ryujinx support buffer
     VKB_B_CBUF = 1, VKB_NCBUF = 17,      // c0..c16 at +1..17
     VKB_B_SBUF = 18, VKB_NSBUF = 16,     // storage buffers in the shader's order
     VKB_B_TEX = 34, VKB_NTEX = 24,       // combined textures in the shader's order
     VKB_B_IMG = 58, VKB_NIMG = 4,        // images in the shader's order
-    VKB_B_TBUF = 62, VKB_NTBUF = 2,      // [Pikmin 4] buffer textures (uniform texel buffers) in the shader's order
-    VKB_B_STBUF = 64, VKB_NSTBUF = 4,    // [Pikmin 4] buffer images (storage texel buffers: Unreal's RWBuffer) in the shader's order
+    VKB_B_TBUF = 62, VKB_NTBUF = 8,      // [Pikmin 4] buffer textures (uniform texel buffers) in the shader's order (Pikmin 4: up to 7)
+    VKB_B_STBUF = 70, VKB_NSTBUF = 4,    // [Pikmin 4] buffer images (storage texel buffers: Unreal's RWBuffer) in the shader's order
 };
 
+// the first universal binding of an NVN stage's block (compute has a layout of its own)
+static inline uint32_t vkb_stage_base(int nvn_stage) { return nvn_stage == 1 ? VKB_STAGE_BINDINGS : nvn_stage == 2 ? 2 * VKB_STAGE_BINDINGS : 0; }
 enum { VKB_SB_TABLE, VKB_SB_UBO, VKB_SB_UBO_PTR };
 typedef struct { uint8_t slot, separate; uint16_t type; uint8_t sslot; } vkb_tex_ref;   // NVN binding slot; Ryujinx SamplerType;
 // [Pikmin 4] separate: a separate texture (c2+0x168) paired with the separate sampler in slot sslot (c2+0x568)
@@ -26,7 +29,7 @@ typedef struct { uint32_t intmask, sintmask; VkShaderEXT obj; } vkb_variant;
 typedef struct {
     VkShaderEXT obj;
     VkShaderStageFlagBits vk_stage;
-    int stage;                           // NVN: 0 vertex, 1 fragment, 5 compute
+    int stage;                           // NVN: 0 vertex, 1 fragment, 2 geometry, 5 compute
     uint32_t cbuf_mask;                  // hardware constant buffer slots read (binding +1+slot): c3..c16 = game uniform
                                          // buffer slot-3, c1 = the shader's own constants (c1 below), c0 = NVN driver bank
     const uint8_t *c1; uint32_t c1_size; // code[control+0x700 .. length): the shader's constants (a copy)
@@ -39,7 +42,7 @@ typedef struct {
     vkb_tex_ref tex[VKB_NTEX]; int ntex; // binding +34+i
     vkb_tex_ref img[VKB_NIMG]; int nimg; // binding +58+i
     vkb_tex_ref tbuf[VKB_NTBUF]; int ntbuf; // [Pikmin 4] binding +62+i: buffer textures (Ryujinx SamplerType.TextureBuffer)
-    vkb_tex_ref stbuf[VKB_NSTBUF]; int nstbuf; // [Pikmin 4] binding +64+i: buffer images
+    vkb_tex_ref stbuf[VKB_NSTBUF]; int nstbuf; // [Pikmin 4] binding +70+i: buffer images
     uint32_t frag_outputs;               // colour outputs written (bit per target)
     int stores;                          // writes storage buffers or images (later work must wait for it)
     int unsupported;                     // a resource outside the layout: draws with it are skipped
