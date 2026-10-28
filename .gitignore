@@ -46,3 +46,8 @@ third_party/maxwell_shader/src/*/obj/
 third_party/shader_translator/bin/
 third_party/shader_translator/obj/
 third_party/totk_xlate/
+
+# nxrecomp port outputs
+build.log
+run/
+UltraTears.exe.rsp

@@ -348,6 +348,10 @@ static void T_nvnCommandBufferEndRecording(Cpu *c) {
     static void *f; if (!f) f = nvn_impl_fn("nvnCommandBufferEndRecording", 0);
     c->x[0] = (uint64_t)((NVNcommandHandle (*)(void *))f)((void *)(uintptr_t)c->x[0]);
 }
+static void T_nvnCommandBufferFenceSync(Cpu *c) {
+    static void *f; if (!f) f = nvn_impl_fn("nvnCommandBufferFenceSync", 0);
+    ((void (*)(void *, void *, NVNsyncCondition, int))f)((void *)(uintptr_t)c->x[0], (void *)(uintptr_t)c->x[1], (NVNsyncCondition)c->x[2], (int)c->x[3]);
+}
 static void T_nvnCommandBufferFinalize(Cpu *c) {
     static void *f; if (!f) f = nvn_impl_fn("nvnCommandBufferFinalize", 0);
     ((void (*)(void *))f)((void *)(uintptr_t)c->x[0]);
@@ -1472,6 +1476,10 @@ static void T_nvnTexturePoolInitialize(Cpu *c) {
     static void *f; if (!f) f = nvn_impl_fn("nvnTexturePoolInitialize", 0);
     c->x[0] = (uint64_t)((NVNboolean (*)(void *, void *, ptrdiff_t, int))f)((void *)(uintptr_t)c->x[0], (void *)(uintptr_t)c->x[1], (ptrdiff_t)c->x[2], (int)c->x[3]);
 }
+static void T_nvnTexturePoolRegisterImage(Cpu *c) {
+    static void *f; if (!f) f = nvn_impl_fn("nvnTexturePoolRegisterImage", 0);
+    ((void (*)(void *, int, void *, void *))f)((void *)(uintptr_t)c->x[0], (int)c->x[1], (void *)(uintptr_t)c->x[2], (void *)(uintptr_t)c->x[3]);
+}
 static void T_nvnTexturePoolRegisterTexture(Cpu *c) {
     static void *f; if (!f) f = nvn_impl_fn("nvnTexturePoolRegisterTexture", 0);
     ((void (*)(void *, int, void *, void *))f)((void *)(uintptr_t)c->x[0], (int)c->x[1], (void *)(uintptr_t)c->x[2], (void *)(uintptr_t)c->x[3]);
@@ -1775,6 +1783,7 @@ const struct { const char *name; void (*fn)(Cpu *); } nvn_thunks[] = {
     {"nvnCommandBufferDrawElementsBaseVertex", T_nvnCommandBufferDrawElementsBaseVertex},
     {"nvnCommandBufferDrawElementsInstanced", T_nvnCommandBufferDrawElementsInstanced},
     {"nvnCommandBufferEndRecording", T_nvnCommandBufferEndRecording},
+    {"nvnCommandBufferFenceSync", T_nvnCommandBufferFenceSync},
     {"nvnCommandBufferFinalize", T_nvnCommandBufferFinalize},
     {"nvnCommandBufferGetCommandMemoryFree", T_nvnCommandBufferGetCommandMemoryFree},
     {"nvnCommandBufferGetCommandMemorySize", T_nvnCommandBufferGetCommandMemorySize},
@@ -2056,6 +2065,7 @@ const struct { const char *name; void (*fn)(Cpu *); } nvn_thunks[] = {
     {"nvnTextureInvalidateTexels", T_nvnTextureInvalidateTexels},
     {"nvnTexturePoolFinalize", T_nvnTexturePoolFinalize},
     {"nvnTexturePoolInitialize", T_nvnTexturePoolInitialize},
+    {"nvnTexturePoolRegisterImage", T_nvnTexturePoolRegisterImage},
     {"nvnTexturePoolRegisterTexture", T_nvnTexturePoolRegisterTexture},
     {"nvnTexturePoolSetDebugLabel", T_nvnTexturePoolSetDebugLabel},
     {"nvnTextureReadTexels", T_nvnTextureReadTexels},
@@ -2111,4 +2121,4 @@ const struct { const char *name; void (*fn)(Cpu *); } nvn_thunks[] = {
     {"nvnWindowSetNumActiveTextures", T_nvnWindowSetNumActiveTextures},
     {"nvnWindowSetPresentInterval", T_nvnWindowSetPresentInterval},
 };
-const unsigned nvn_thunk_count = 421;
+const unsigned nvn_thunk_count = 423;
