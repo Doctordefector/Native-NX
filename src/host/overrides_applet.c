@@ -16,7 +16,9 @@ static pthread_cond_t message_cv = PTHREAD_COND_INITIALIZER;
 static uint32_t messages[32];
 static unsigned head, tail;
 static uint64_t start_ns;
-__attribute__((constructor)) static void started(void) { start_ns = runtime_now_ns(); }
+/* [Pikmin 4] Horizon queues FocusStateChanged (15) for an application when it comes to the foreground at launch;
+   Unreal's Switch application counts itself inactive (media and streaming paused) until it reads that message. */
+__attribute__((constructor)) static void started(void) { start_ns = runtime_now_ns(); messages[tail++] = 15; }
 
 void runtime_oe_push_message(uint32_t message) {
     pthread_mutex_lock(&lock);
