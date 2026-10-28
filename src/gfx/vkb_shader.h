@@ -15,7 +15,8 @@ enum {
 };
 
 enum { VKB_SB_TABLE, VKB_SB_UBO, VKB_SB_UBO_PTR };
-typedef struct { uint8_t slot, separate; uint16_t type; } vkb_tex_ref;   // NVN binding slot; Ryujinx SamplerType
+typedef struct { uint8_t slot, separate; uint16_t type; uint8_t sslot; } vkb_tex_ref;   // NVN binding slot; Ryujinx SamplerType;
+// [Pikmin 4] separate: a separate texture (c2+0x168) paired with the separate sampler in slot sslot (c2+0x568)
 
 enum { VKB_VARIANTS = 8 };
 typedef struct { uint32_t intmask, sintmask; VkShaderEXT obj; } vkb_variant;

@@ -129,7 +129,7 @@ static __thread struct {
     p_poly_offset po; float blend_color[4];
     uint32_t vattr[16]; int nvattr; vs_st vstream[16]; int nvstream; NVNbufferRange vbuf[16];
     p_bind_buf ubo[6][18], ssbo[6][16];
-    uint64_t tex[6][32], img[6][8];
+    uint64_t tex[6][32], img[6][8], samp[6][32];   // [Pikmin 4] samp: separate sampler handles (sampler id << 20)
     int depth_clamp, raster_discard;
     const char *bad_key;   // the unsupported shader of a program that cannot be drawn (audit)
     const prog_t *stage_prog[6];   // [Pikmin 4] the program bound to each stage (NVN binds per stage mask)
@@ -236,6 +236,12 @@ void vkb_state(uint32_t op, const uint8_t *a) {
         uint64_t *dst = op == OP_BIND_TEX ? S.tex[b->stage] : S.img[b->stage];
         int max = op == OP_BIND_TEX ? 32 : 8;
         for (int i = 0; i < b->n && b->first + i < max; i++) dst[b->first + i] = b->h[i];
+        break;
+    }
+    case OP_BIND_SAMP: {   /* [Pikmin 4] separate samplers (Unreal binds every texture this way) */
+        const p_bind_handles *b = (const p_bind_handles *)a;
+        if (b->stage < 0 || b->stage >= 6) break;
+        for (int i = 0; i < b->n && b->first + i < 32; i++) S.samp[b->stage][b->first + i] = b->h[i];
         break;
     }
     case OP_DEPTH_CLAMP: S.depth_clamp = ((const p_flag *)a)->value; break;
@@ -413,6 +419,11 @@ static VkImageViewType view_type_of(uint16_t t) {   // Ryujinx SamplerType
 }
 
 // The image a texture handle names (NULL: none / not an image yet); *view points to a copy of the pool entry's view.
+// [Pikmin 4] the combined handle a shader texture reads: a separate texture takes its sampler from the separate sampler slot
+static uint64_t tex_handle(int stage, const vkb_tex_ref *t) {
+    uint64_t h = S.tex[stage][t->slot];
+    return t->separate ? (h & 0xFFFFFu) | (S.samp[stage][t->sslot] & ~(uint64_t)0xFFFFF) : h;
+}
 static vkb_image *handle_image(uint64_t h, const view_t **view) {
     static __thread view_t views[64];
     static __thread unsigned next;
@@ -451,7 +462,7 @@ static void feedback_scan(const vkb_shader *vs, const vkb_shader *fs) {
         const vkb_shader *sh = st ? fs : vs;
         for (int i = 0; sh && i < sh->ntex; i++) {
             const view_t *v = NULL;
-            int b = fb_index(sh->tex[i].separate ? NULL : handle_image(S.tex[st][sh->tex[i].slot], &v));
+            int b = fb_index(handle_image(tex_handle(st, &sh->tex[i]), &v));
             if (b >= 0) g_fb |= 1u << b;
         }
     }
@@ -627,6 +638,7 @@ static VkDescriptorBufferInfo driver_bank(int bank, int stage) {
     } else {
         memcpy(src, S.tex[stage], sizeof S.tex[stage]); n = sizeof S.tex[stage];
         memcpy(src + n, S.img[stage], sizeof S.img[stage]); n += sizeof S.img[stage];
+        memcpy(src + n, S.samp[stage], sizeof S.samp[stage]); n += sizeof S.samp[stage];
     }
     int bi = bank ? 1 : 0;
     if (last[bi][stage].rec == g_sub && last[bi][stage].n == n && !memcmp(last[bi][stage].src, src, n) && !no_cache())
@@ -653,6 +665,11 @@ static VkDescriptorBufferInfo driver_bank(int bank, int stage) {
     } else {
         for (int r = 0; r < 32; r++) memcpy(p + 0x20 + 8 * r, &S.tex[stage][r], 8);
         for (int r = 0; r < 8; r++) memcpy(p + 0x120 + 8 * r, &S.img[stage][r], 8);
+        for (int r = 0; r < 32; r++) {   // [Pikmin 4] separate textures at 0x168, separate samplers at 0x568
+            uint32_t t = (uint32_t)(S.tex[stage][r] & 0xFFFFF), sm = (uint32_t)(S.samp[stage][r] & 0xFFF00000u);   // shaders OR the two words
+            memcpy(p + 0x168 + 8 * r, &t, 4);
+            memcpy(p + 0x568 + 8 * r, &sm, 4);
+        }
     }
     return (VkDescriptorBufferInfo){b, off, 0x1000};
 }
@@ -703,7 +720,7 @@ static void prepare_images(const vkb_shader *sh, int stage) {
     VkCommandBuffer cb = vkb_cmd();
     for (int i = 0; i < sh->ntex; i++) {
         const view_t *v = NULL;
-        vkb_image *im = sh->tex[i].separate ? NULL : handle_image(S.tex[stage][sh->tex[i].slot], &v);
+        vkb_image *im = handle_image(tex_handle(stage, &sh->tex[i]), &v);
         if (im && im->refresh_from) vkb_tex_refresh(cb, im);
         if (!im || fb_sampled(im)) continue;   // a sampled target: the pass sets its layout
         vkb_tex_upload(cb, im);
@@ -726,7 +743,7 @@ static int images_need_work(const vkb_shader *sh, int stage) {
     int mt = vkb_mt_recording();
     for (int i = 0; i < sh->ntex; i++) {
         const view_t *v = NULL;
-        vkb_image *im = sh->tex[i].separate ? NULL : handle_image(S.tex[stage][sh->tex[i].slot], &v);
+        vkb_image *im = handle_image(tex_handle(stage, &sh->tex[i]), &v);
         // render targets have no upload stamp: only their layout matters (this ended the pass at every draw before)
         if (!im || fb_sampled(im)) continue;
         if (mt) vkb_tex_upload(VK_NULL_HANDLE, im);
@@ -887,15 +904,14 @@ static void write_stage(writes_t *W, VkDescriptorSet set, const vkb_shader *sh, 
         put_buf(W, set, base + VKB_B_SBUF + (uint32_t)i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, bi);
     }
     for (int i = 0; i < sh->ntex; i++) {
-        uint64_t h = sh->tex[i].separate ? 0 : S.tex[stage][sh->tex[i].slot];
+        uint64_t h = tex_handle(stage, &sh->tex[i]);
         const view_t *v = NULL;
         vkb_image *im = h ? handle_image(h, &v) : NULL;
         VkImageViewType vt = view_type_of(sh->tex[i].type);
         int readable = im && (fb_sampled(im) ? vkb_layout_is(im, VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT)
                                              : vkb_layout_is(im, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
         VkImageView view = readable ? vkb_view(im, v, 0, (int)vt) : VK_NULL_HANDLE;
-        if (sh->tex[i].separate) vkb_audit(A_TEX_SEPARATE, sh->key);
-        else if (!(h & 0xFFFFF)) vkb_audit(A_TEX_UNBOUND, sh->key);
+        if (!(h & 0xFFFFF)) vkb_audit(A_TEX_UNBOUND, sh->key);
         else if (!im) vkb_audit(A_TEX_NO_IMAGE, sh->key);
         else if (!view) vkb_audit(A_TEX_NOT_READY, sh->key);
         else if (im->not_uploadable) vkb_audit(A_TEX_NOT_UPLOADED, sh->key);
@@ -1466,12 +1482,12 @@ static void trace_resources(const vkb_shader *sh, int stage) {
     int n = snprintf(line, sizeof line, "[draw]   %s %.12s:", stage == 0 ? "vs" : stage == 1 ? "fs" : "cs", sh->key ? sh->key : "?");
     for (int i = 0; i < sh->ntex && n < 900; i++) {
         const view_t *v = NULL;
-        vkb_image *im = sh->tex[i].separate ? NULL : handle_image(S.tex[stage][sh->tex[i].slot], &v);
+        vkb_image *im = handle_image(tex_handle(stage, &sh->tex[i]), &v);
         n += im ? snprintf(line + n, sizeof line - n, " t%d=%llu/%#x/%ux%u%s@%p#%04llx", sh->tex[i].slot, (unsigned long long)im->serial, im->d.format,
                            im->width, im->height, im->gpu_written ? "/gpu" : "", (const void *)im->storage,
                            (unsigned long long)((uintptr_t)im->img & 0xffff))
                 : snprintf(line + n, sizeof line - n, " t%d=-", sh->tex[i].slot);
-        int sid = (int)(S.tex[stage][sh->tex[i].slot] >> 20) & 0xFFF;
+        int sid = (int)(tex_handle(stage, &sh->tex[i]) >> 20) & 0xFFF;
         vkb_rw_read(&g_reg_mu, LK_TEXREG);
         if (sid < g_nsreg && g_sreg[sid].valid) {
             const samp_par *sp = &g_sreg[sid].p;
@@ -1640,7 +1656,7 @@ void vkb_draw(const uint8_t *a, int indexed) {
             const vkb_shader *sh = st ? fs : vs;
             for (int i = 0; sh && i < sh->ntex; i++) {
                 const view_t *v = NULL;
-                vkb_image *im = sh->tex[i].separate ? NULL : handle_image(S.tex[st][sh->tex[i].slot], &v);
+                vkb_image *im = handle_image(tex_handle(st, &sh->tex[i]), &v);
                 snprintf(what, sizeof what, "%ct%d", st ? 'f' : 'v', sh->tex[i].slot);
                 if (im) vkb_tex_snap(vkb_cmd(), im, what);
             }

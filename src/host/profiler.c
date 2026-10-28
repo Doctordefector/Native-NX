@@ -292,7 +292,55 @@ static DWORD WINAPI profiler(void *unused) {
     return 0;
 }
 
+/* [Pikmin 4] TOTK_STACKS=<s>[,<s>...]: at those times, every thread's call stack (the game executable's frames,
+   recompiled functions with their guest symbol) to stderr: where a stalled game waits. */
+static double stacks_at[8]; static int nstacks;
+static void dump_stacks(void) {
+    HANDLE proc = GetCurrentProcess();
+    sym_init(proc);
+    list_threads(GetCurrentThreadId());
+    fprintf(stderr, "[stacks] %u threads at %.1f s\n", nhandles, runtime_now_ns() / 1e9);
+    for (unsigned i = 0; i < nhandles; i++) {
+        HANDLE h = handles[i];
+        if (SuspendThread(h) == (DWORD)-1) continue;
+        CONTEXT ctx = {.ContextFlags = CONTEXT_FULL};
+        uint64_t frames[40]; int nf = 0;
+        if (GetThreadContext(h, &ctx)) {
+            uint64_t rip = ctx.Rip;
+            for (int d = 0; d < 96 && rip && nf < 40; d++) {
+                if (rip >= exe_lo && rip < exe_hi) frames[nf++] = rip;
+                DWORD64 base;
+                PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(rip, &base, NULL);
+                if (fe) { void *hd; DWORD64 fr; RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, rip, fe, &ctx, &hd, &fr, NULL); }
+                else { ctx.Rip = *(DWORD64 *)(uintptr_t)ctx.Rsp; ctx.Rsp += 8; }
+                rip = ctx.Rip;
+            }
+        }
+        ResumeThread(h);
+        fprintf(stderr, "[stacks] thread %lu:\n", (unsigned long)GetThreadId(h));
+        for (int k = 0; k < nf; k++) {
+            char name[400];
+            uint64_t fn = describe(proc, frames[k], name, sizeof name);
+            fprintf(stderr, "[stacks]    %s +%#llx\n", name, (unsigned long long)(frames[k] - fn));
+        }
+    }
+}
+static DWORD WINAPI stacks_thread(void *unused) {
+    (void)unused;
+    double done = 0;
+    for (int i = 0; i < nstacks; i++) { Sleep((DWORD)((stacks_at[i] - done) * 1000)); done = stacks_at[i]; dump_stacks(); }
+    return 0;
+}
+
 void runtime_profiler_start(void) {
+    const char *st = getenv("TOTK_STACKS");
+    if (st && *st) {
+        for (const char *q = st; q && *q && nstacks < 8; q = strchr(q, ',') ? strchr(q, ',') + 1 : NULL) stacks_at[nstacks++] = atof(q);
+        ntdll = GetModuleHandleA("ntdll.dll");
+        module_range(GetModuleHandleA(NULL), &exe_lo, &exe_hi);
+        HANDLE h = CreateThread(NULL, 0, stacks_thread, NULL, 0, NULL);
+        if (h) CloseHandle(h);
+    }
     const char *e = getenv("TOTK_PROF");
     if (!e || !*e) return;
     char path[512] = "";

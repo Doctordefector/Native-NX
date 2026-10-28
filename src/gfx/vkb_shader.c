@@ -265,11 +265,19 @@ static int load(vkb_shader *s, const char *key, int nvn_stage) {
     // separate textures at 0x168 (MacNativeGames' totk_xlate Service.cs)
     if ((p = json_array(j, "textures")))
         for (; (p = json_next(p, &e)); p = e) {
-            long b = json_int(p, e, "binding", -1), h = json_int(p, e, "handle", -1) * 4, type = json_int(p, e, "type", 3);
-            if (b < 0 || b > 255 || s->ntex >= VKB_NTEX || h < 0x20) { s->unsupported = 1; continue; }
+            /* [Pikmin 4] Ryujinx packs the handle: word offset 0 in bits 0-13, word offset 1 in bits 14-27, type in 28+
+               (1: separate sampler handle, the texture and the sampler each from its own offset, in either order) */
+            long b = json_int(p, e, "binding", -1), raw = json_int(p, e, "handle", -1), type = json_int(p, e, "type", 3);
+            long h = (raw & 0x3fff) * 4, h1 = ((raw >> 14) & 0x3fff) * 4, kind = raw >> 28;
+            if (kind == 1 && h >= 0x568) { long x = h; h = h1; h1 = x; }
+            if (b < 0 || b > 255 || s->ntex >= VKB_NTEX || h < 0x20 || raw < 0 || (kind == 1 && (h < 0x168 || h >= 0x568 || h1 < 0x568)) || kind > 1) {
+                static int said; if (said++ < 8) VLOG("shader %s: texture handle %#lx not understood", key, raw);
+                s->unsupported = 1; continue;
+            }
             vkb_tex_ref *t = &s->tex[s->ntex];
             t->separate = h >= 0x168;
             t->slot = (uint8_t)((h - (t->separate ? 0x168 : 0x20)) / 8);
+            t->sslot = kind == 1 ? (uint8_t)((h1 - 0x568) / 8) : 0;
             t->type = (uint16_t)type;
             remap[b] = base + VKB_B_TEX + (uint32_t)s->ntex++;
         }

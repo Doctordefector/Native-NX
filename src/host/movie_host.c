@@ -28,6 +28,7 @@
 #include "../runtime/hle.h"
 #include <emmintrin.h>  // [port] arm_neon.h
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -105,7 +106,14 @@ static void md_set_rect(void *md, const char *key, int l, int t, int r, int b) {
     GCALL(G.md_set_rect, U(md), U(key), (uint64_t)(uint32_t)l, (uint64_t)(uint32_t)t, (uint64_t)(uint32_t)r, (uint64_t)(uint32_t)b);
 }
 static void md_set_string(void *md, const char *key, const char *v) { GCALL(G.md_set_string, U(md), U(key), U(v)); }
-static uint64_t orig(int which, int n, const uint64_t *args) { return guest_call_args(U(G.orig[which]), n, args); }
+static uint64_t orig(int which, int n, const uint64_t *args) {
+    uint64_t r = guest_call_args(U(G.orig[which]), n, args);
+    static int trace = -1; static _Atomic int said[MOVIE_ENTRIES], errs;   /* [Pikmin 4] TOTK_MOVIE_TRACE: the library's decoders */
+    if (trace < 0) trace = getenv("TOTK_MOVIE_TRACE") != NULL;
+    if (trace && (said[which]++ < 6 || ((uint32_t)r && which != MOVIE_CTOR && which != MOVIE_D0 && which != MOVIE_D2 && errs++ < 40)))
+        MLOG("library decoder %#llx: entry %d -> %#x", (unsigned long long)args[0], which, (unsigned)r);
+    return r;
+}
 
 /* [port] input buffers are written by the game's code: guest-visible host memory, which has no free, so they are kept
    for reuse (one cutscene at a time in practice; 28 cutscenes would otherwise use up the heap) */

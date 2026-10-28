@@ -515,6 +515,14 @@ static unsigned open_file(uint64_t *out, const char *path, int mode) {
     runtime_fail("host file handle table full");
 }
 static unsigned read_file(uint64_t *out, uint64_t h, int64_t offset, void *buffer, uint64_t size) {
+    if (fs_log_on > 0) {   /* [Pikmin 4] TOTK_FS_LOG: read throughput every 5 s */
+        static _Atomic uint64_t calls, bytes, next;
+        uint64_t now = runtime_now_ns(), nx = atomic_load(&next);
+        atomic_fetch_add(&calls, 1); atomic_fetch_add(&bytes, size);
+        if (now >= nx && atomic_compare_exchange_strong(&next, &nx, now + 5000000000ull))
+            fprintf(stderr, "[totk-fs] %8.3f reads so far: %llu calls, %.1f MB\n", (now - fs_log_t0) / 1e9,
+                    (unsigned long long)atomic_load(&calls), atomic_load(&bytes) / 1e6);
+    }
     if (romfs_handle(h)) return romfs_read(out, h, offset, buffer, size);
     int fd, mode;
     if (!out || offset < 0 || (!buffer && size) || !file_of(h, &fd, &mode)) return R_INVALID_ARGUMENT;
