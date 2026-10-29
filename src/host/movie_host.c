@@ -234,6 +234,20 @@ void movie_host_tick(void) {   /* lock order g_lock -> Movie.mu, as in destroy; 
     fire(&s);
 }
 /* Decode one input into output slots; returns 0 when it had to wait for a free output slot. */
+/* development: TOTK_MOVIE_IVF=<dir> writes the first movie's VP9 packets as <dir>/movie.ivf, to decode outside the port */
+static void ivf_dump(const Movie *m, const uint8_t *d, int n, int64_t t) {
+    static FILE *f; static int done; static const Movie *who;
+    if (done) return;
+    if (!f) { const char *e = getenv("TOTK_MOVIE_IVF"); if (!e) { done = 1; return; }
+        char path[1024]; snprintf(path, sizeof path, "%s/movie.ivf", e); if (!(f = fopen(path, "wb"))) { done = 1; return; }
+        uint8_t h[32] = {'D', 'K', 'I', 'F', 0, 0, 32, 0, 'V', 'P', '9', '0'};
+        h[12] = (uint8_t)m->w; h[13] = (uint8_t)(m->w >> 8); h[14] = (uint8_t)m->h; h[15] = (uint8_t)(m->h >> 8);
+        h[16] = 0x40; h[17] = 0x42; h[18] = 0x0f; h[20] = 1;   /* time base 1/1000000 (us) */
+        fwrite(h, 1, 32, f); who = m; }
+    if (m != who) return;
+    uint8_t fh[12]; for (int i = 0; i < 4; i++) fh[i] = (uint8_t)(n >> (8 * i)); for (int i = 0; i < 8; i++) fh[4 + i] = (uint8_t)((uint64_t)t >> (8 * i));
+    fwrite(fh, 1, 12, f); fwrite(d, 1, (size_t)n, f); fflush(f);
+}
 static int decode_one(Movie *m, Signals *s, const Pending *p) {
     int need = p->size > 0 ? 1 : 0;
     if (p->flags & FLAG_EOS && !m->eos_in) need++;
@@ -241,6 +255,7 @@ static int decode_one(Movie *m, Signals *s, const Pending *p) {
     if (freeslots < need) return 0;
     if (p->size > 0) {
         uint64_t t0 = now_ns();
+        ivf_dump(m, m->in[p->index] + p->offset, p->size, p->time);
         vpx_codec_err_t e = vpx_codec_decode(&m->vpx, m->in[p->index] + p->offset, (unsigned)p->size, NULL, 0);
         if (e != VPX_CODEC_OK) {
             m->errors++; m->last_error = ST_ERROR; note(m, s, EV_ERROR);
@@ -256,7 +271,7 @@ static int decode_one(Movie *m, Signals *s, const Pending *p) {
                 if (!m->format_sent) { m->format_sent = 1; note(m, s, EV_FORMAT); }
                 to_nv12(img, m->out[slot], m->w, m->h);
                 push_ready(m, s, slot, 0, p->time, frame_bytes(m));
-                if (!m->frames++) MLOG("first frame decoded (%lld us, Y at the centre %d)", (long long)p->time, m->out[slot][(size_t)m->w * (m->h / 2) + m->w / 2]);
+                if (!m->frames++) MLOG("first frame decoded (%lld us, Y at the centre %d, colour space %d, range %d)", (long long)p->time, m->out[slot][(size_t)m->w * (m->h / 2) + m->w / 2], (int)img->cs, (int)img->range);
             }
         }
         m->decode_ns += now_ns() - t0;
@@ -527,17 +542,19 @@ int nvn_host_texture_info(const void *t, int *w, int *h);
 void nvn_host_write_texture(const void *t, const void *rgba, int w, int h);
 void nvn_host_signal_sync(void *s);
 static inline uint8_t clamp8(int v) { return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
-static void nv12_to_rgba(const uint8_t *nv12, int sw, int sh, uint8_t *out, int w, int h) {
+/* bgra: the texture's format stores blue first (NVN BGRX8/BGRA8 and their SRGB forms, 0x99..0x9C; Pikmin 4's movie
+   textures are RGBA8_SRGB, 0x38), so red and blue trade places */
+static void nv12_to_rgba(const uint8_t *nv12, int sw, int sh, uint8_t *out, int w, int h, int bgra) {
     const uint8_t *uv = nv12 + (size_t)sw * sh;
-    int cs = chroma_stride(sw);
+    int cs = chroma_stride(sw), ri = bgra ? 2 : 0, bi = bgra ? 0 : 2;
     for (int y = 0; y < h; y++) {
         const uint8_t *yr = nv12 + (size_t)y * sw, *cr = uv + (size_t)(y / 2) * cs;
         uint8_t *o = out + (size_t)y * w * 4;
         for (int x = 0; x < w; x++) {
             int c = 298 * (yr[x] - 16), d = cr[x & ~1] - 128, e = cr[(x & ~1) + 1] - 128;
-            o[0] = clamp8((c + 459 * e + 128) >> 8);
+            o[ri] = clamp8((c + 459 * e + 128) >> 8);
             o[1] = clamp8((c - 55 * d - 136 * e + 128) >> 8);
-            o[2] = clamp8((c + 541 * d + 128) >> 8);
+            o[bi] = clamp8((c + 541 * d + 128) >> 8);
             o[3] = 255; o += 4;
         }
     }
@@ -545,8 +562,8 @@ static void nv12_to_rgba(const uint8_t *nv12, int sw, int sh, uint8_t *out, int 
 static int out_texture(Movie *m, int index, void *buf) {
     void *tex = buf_base(buf);   /* guest calls before the decoder's lock */
     void *sync = G.buf_nvn_sync ? (void *)(uintptr_t)GCALL(G.buf_nvn_sync, U(buf)) : NULL;
-    int tw = 0, th = 0;
-    if (!tex || nvn_host_texture_info(tex, &tw, &th) < 0) {
+    int tw = 0, th = 0, fmt = tex ? nvn_host_texture_info(tex, &tw, &th) : -1;
+    if (fmt < 0) {
         static int said; if (!said++) MLOG("texture mode: buffer data %p is not an NVN texture", tex);
         return ST_NULL;
     }
@@ -558,13 +575,13 @@ static int out_texture(Movie *m, int index, void *buf) {
         uint8_t *p = realloc(m->rgba, (size_t)w * h * 4);
         if (!p) runtime_fail("movie RGBA frame");
         m->rgba = p;
-        nv12_to_rgba(m->out[index], m->w, m->h, m->rgba, w, h);
+        nv12_to_rgba(m->out[index], m->w, m->h, m->rgba, w, h, fmt >= 0x99 && fmt <= 0x9C);
     }
     m->out_held[index] = 0; drain_pending(m, &s);
     pthread_mutex_unlock(&m->mu);
     if (have) nvn_host_write_texture(tex, m->rgba, w, h);
     if (sync) nvn_host_signal_sync(sync);
     fire(&s);
-    static int said; if (said++ < 2) MLOG("texture mode: output %d -> texture %p (%dx%d of %dx%d)%s", index, tex, w, h, tw, th, have ? "" : " (no picture)");
+    static int said; if (said++ < 2) MLOG("texture mode: output %d -> texture %p (%dx%d of %dx%d, format 0x%x)%s", index, tex, w, h, tw, th, fmt, have ? "" : " (no picture)");
     return ST_OK;
 }

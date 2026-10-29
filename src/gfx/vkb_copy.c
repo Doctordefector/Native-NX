@@ -111,8 +111,15 @@ static VkFormatFeatureFlags features(VkFormat f) {
     return p.optimalTilingFeatures;
 }
 
+// [Pikmin 4] 8-bit RGBA / BGRA, linear or sRGB: between two different ones the copy converts (nxnative copy_t2t draws a
+// format change: Bayonetta 2's BGRA8 frame into RGBA8). Pikmin 4's menu background copies the RGBA8_SRGB title movie
+// into a BGRA8 texture; copied as bytes, its red and blue traded places.
+static int rgba8_family(VkFormat f) {
+    return f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_R8G8B8A8_SRGB || f == VK_FORMAT_B8G8R8A8_UNORM || f == VK_FORMAT_B8G8R8A8_SRGB;
+}
+
 // CopyTextureToTexture: the same size as a plain copy (formats of one texel size: a reinterpretation, as on the
-// Switch); scaling, mirroring or a different texel size as a blit (filtered with LINEAR_FILTER).
+// Switch, except within rgba8_family); scaling, mirroring or a different texel size as a blit (filtered with LINEAR_FILTER).
 void vkb_copy_tex_tex(const p_copy_t2t *c) {
     vkb_image *s = c->src ? vkb_image_of(c->src) : NULL, *d = c->dst ? vkb_image_of(c->dst) : NULL;
     if (!s || !d) { unsupported("texture -> texture copy", s ? s : d); return; }
@@ -128,7 +135,9 @@ void vkb_copy_tex_tex(const p_copy_t2t *c) {
     int sbw, sbh, dbw, dbh, sbpb = nvn_fmt_bpb(s->d.format, &sbw, &sbh), dbpb = nvn_fmt_bpb(d->d.format, &dbw, &dbh);
     int mirror = c->flags & (NVN_COPY_FLAGS_MIRROR_X_BIT | NVN_COPY_FLAGS_MIRROR_Y_BIT | NVN_COPY_FLAGS_MIRROR_Z_BIT);
     int same = c->sr.width == c->dr.width && c->sr.height == c->dr.height && snz == dnz && !mirror;
-    int plain = same && (s->format == d->format || (sbpb && sbpb == dbpb && sbw == dbw && sbh == dbh && !s->astc));
+    int convert = s->format != d->format && rgba8_family(s->format) && rgba8_family(d->format);
+    int plain = same && (s->format == d->format || (sbpb && sbpb == dbpb && sbw == dbw && sbh == dbh && !s->astc && !convert));
+    { static int said; if (convert && same && said++ < 4) VLOG("texture -> texture copy %ux%u converts format %d -> %d", c->sr.width, c->sr.height, s->format, d->format); }
     VkFilter filter = c->flags & NVN_COPY_FLAGS_LINEAR_FILTER_BIT ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     if (!plain) {   // a blit: both formats must allow it (and filtering, when asked for)
         VkFormatFeatureFlags sf = features(s->format), df = features(d->format);

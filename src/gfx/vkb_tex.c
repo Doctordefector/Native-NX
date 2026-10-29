@@ -95,7 +95,7 @@ VkFormat vkb_format(int f, VkImageAspectFlags *aspect, int *astc) {
     case 0x76: return VK_FORMAT_R32G32B32A32_SFLOAT;
     case 0x95: case 0x96: case 0x97: return VK_FORMAT_R5G5B5A1_UNORM_PACK16;
     case 0x99: case 0x9A: return VK_FORMAT_B8G8R8A8_UNORM;   // BGRX8, BGRA8 (nvn.h; 0x98 is A1BGR5)
-    case 0x9B: case 0x9C: return VK_FORMAT_B8G8R8A8_SRGB;    // BGRX8_SRGB, BGRA8_SRGB (Pikmin 4's movie textures)
+    case 0x9B: case 0x9C: return VK_FORMAT_B8G8R8A8_SRGB;    // BGRX8_SRGB, BGRA8_SRGB
     default: return VK_FORMAT_UNDEFINED;
     }
 }
