@@ -3,7 +3,7 @@
 A guide for any agent starting a new port here, such as Pikmin 3 Deluxe. Read it before you touch anything.
 
 **Status:** Pikmin 4 (`ports\pikmin4`) is playable, confirmed by the owner. Its `PORTING.md` has the history and
-the debugging methods that worked. Pikmin 3 Deluxe has not been started; see the `work\` section below.
+the debugging methods that worked. Pikmin 3 Deluxe is in progress in `ports\pikmin3` (32-bit ARM, so it has its own AArch32 translator; see its README).
 
 ## Ground rules from the owner (non-negotiable)
 
