@@ -58,6 +58,4 @@ work\                    per-game output (made from your files: keep it private)
 Everything above except what comes from your own console or from other projects' checkouts: `work\` (your dumps),
 `refs\` (reference clones of nxnative, UltraTears and SwitchRecomp), `.venv\`, `.cache\` and built binaries are
 not included (see `.gitignore`). Licenses are per directory: `ports\pikmin4` is GPLv3 (UltraTears),
-`ports\pikmin3` is Apache 2.0 (SwitchRecomp by MZ Labs, keep `NOTICE.txt`), `nxrecomp	ools
-x_extract` is MIT
-(nxnative).
+`ports\pikmin3` is Apache 2.0 (SwitchRecomp by MZ Labs, keep `NOTICE.txt`), `nxrecomp\tools\nx_extract` is MIT (nxnative).
