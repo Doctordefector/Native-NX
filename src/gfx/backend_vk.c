@@ -1234,12 +1234,17 @@ void mtl_tex_release(tex_t *t) { vkb_tex_release(t); }
 // ---------------- presentation ----------------
 
 // TOTK_SHOT=<present number>:<file.bmp>: saves that presented frame (development check of the picture).
+// [Pikmin 4] TOTK_SHOT_EVERY=<n>: from that present on, every n-th one, as <file>_<present>.bmp (the game keeps running)
 static VkBuffer g_shot_buf;
 static VkDeviceMemory g_shot_mem;
+static uint64_t g_shot_n;
+static long long shot_every(void) { static long long v = -1; if (v < 0) { const char *e = getenv("TOTK_SHOT_EVERY"); v = e ? atoll(e) : 0; } return v; }
 static VkBuffer shot_record(VkCommandBuffer cb, uint64_t n, VkImage out, uint32_t w, uint32_t h) {
     static long long at = -1;
     if (at == -1) { const char *e = getenv("TOTK_SHOT"); at = e ? atoll(e) : 0; }
-    if (at <= 0 || (uint64_t)at != n) return VK_NULL_HANDLE;
+    long long every = shot_every();
+    if (at <= 0 || (every > 0 ? n < (uint64_t)at || (n - (uint64_t)at) % (uint64_t)every : (uint64_t)at != n)) return VK_NULL_HANDLE;
+    g_shot_n = n;
     VkBufferCreateInfo bi = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = (VkDeviceSize)w * h * 4,
                              .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     if (!vk_check(vk.vkCreateBuffer(vkc.device, &bi, NULL, &g_shot_buf), "shot buffer")) return VK_NULL_HANDLE;
@@ -1262,7 +1267,11 @@ static void shot_write(uint64_t fence, uint32_t w, uint32_t h) {
     mtl_wait(fence, UINT64_MAX);
     void *px = NULL;
     if (path && vk.vkMapMemory(vkc.device, g_shot_mem, 0, VK_WHOLE_SIZE, 0, &px) == VK_SUCCESS) {
-        FILE *f = fopen(path + 1, "wb");
+        char numbered[1100];
+        const char *dot = strrchr(path + 1, '.');
+        if (shot_every() > 0 && dot) { snprintf(numbered, sizeof numbered, "%.*s_%llu%s", (int)(dot - path - 1), path + 1, (unsigned long long)g_shot_n, dot); }
+        else snprintf(numbered, sizeof numbered, "%s", path + 1);
+        FILE *f = fopen(numbered, "wb");
         if (f) {   // 32-bit BGRA, top-down
             uint32_t size = w * h * 4;
             uint8_t hdr[54] = {'B', 'M'};
@@ -1277,7 +1286,7 @@ static void shot_write(uint64_t fence, uint32_t w, uint32_t h) {
             fwrite(hdr, 1, sizeof hdr, f);
             fwrite(px, 1, size, f);
             fclose(f);
-            VLOG("frame saved to %s (%ux%u)", path + 1, w, h);
+            VLOG("frame saved to %s (%ux%u)", numbered, w, h);
         }
         vk.vkUnmapMemory(vkc.device, g_shot_mem);
     }
