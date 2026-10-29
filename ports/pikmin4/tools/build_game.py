@@ -24,7 +24,7 @@ TARGETS = {'probe_cpu': ['src/probe/probe_cpu.c'],
                     'src/host/fs.c', 'src/host/account.c',
                     'src/host/overrides_applet.c', 'src/host/overrides_input.c',
                     'src/host/audio_renderer.c', 'src/host/audio_mixer.c', 'src/host/audio_effects.c',
-                    'src/host/audio_reverb.c', 'src/host/opus_codec.c', 'src/host/movie_host.c', 'src/host/hid_feedback.c',
+                    'src/host/audio_reverb.c', 'src/host/opus_codec.c', 'src/host/movie_host.c', 'src/host/hid_feedback.c', 'src/host/game_meta.c',
                     'src/host/shared_font.c',
                     'src/host/window_sdl.c', 'src/vk/vk.c', 'src/vk/present.c', 'src/host/motion_fusion.c',
                     'src/host/profiler.c', 'src/host/watch.c']}

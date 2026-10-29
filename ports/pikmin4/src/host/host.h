@@ -55,6 +55,11 @@ void runtime_gamepad_set(const RuntimeGamepadState *s);
 void runtime_input_key(unsigned code, int down);   // Mac virtual key codes (MacNativeGames' key layout)
 void runtime_input_clear(void);
 
+// ---- the game's name and icon from the dump (game_meta.c)
+void game_meta_init(const char *exefs);
+const char *game_meta_title(void);   // NACP name, else "UltraTears"
+int game_meta_icon(unsigned char **px, int *w, int *h);   // 32-bit RGBA, free() it; 0 = none
+
 // ---- window (window_sdl.c): SDL3 on the main thread
 int window_init(void);              // 1 = window up (presentation may still be missing: logged)
 _Noreturn void window_loop(void);

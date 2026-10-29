@@ -145,8 +145,16 @@ int window_init(void) {
     }
     pad_lock = SDL_CreateMutex();
     vpad_attach();
-    window = SDL_CreateWindow("UltraTears", 1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    window = SDL_CreateWindow(game_meta_title(), 1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!window) { fprintf(stderr, "[totk] window: %s\n", SDL_GetError()); return 0; }
+    {   // [Pikmin 4] the game's own icon (icon.jpg from the dump) for the window and the taskbar
+        unsigned char *px; int iw, ih;
+        if (game_meta_icon(&px, &iw, &ih)) {
+            SDL_Surface *ic = SDL_CreateSurfaceFrom(iw, ih, SDL_PIXELFORMAT_RGBA32, px, iw * 4);
+            if (ic) { SDL_SetWindowIcon(window, ic); SDL_DestroySurface(ic); }
+            free(px);
+        }
+    }
     if (!vkp_init(window))
         runtime_fail("Vulkan initialization failed (Vulkan 1.3 with VK_EXT_shader_object is required)");
     return 1;
@@ -214,15 +222,18 @@ static void toggle_fullscreen(void) {
     SDL_SetWindowFullscreen(window, !on);   // borderless desktop fullscreen (no display mode change)
 }
 
-// Game frame rate and shown frame rate in the title, twice a second.
+// Game frame rate and shown frame rate in the title, twice a second, with TOTK_TITLE_FPS=1 (development); otherwise
+// the title is the game's name only.
 static void title_update(void) {
-    static uint64_t t0, game0, shown0;
+    static uint64_t t0, game0, shown0; static int on = -1;
+    if (on < 0) { const char *e = getenv("TOTK_TITLE_FPS"); on = e && strcmp(e, "0"); }
+    if (!on) return;
     uint64_t now = runtime_now_ns(), game = vkp_frames(), shown = vkp_presented();
     if (!t0) { t0 = now; game0 = game; shown0 = shown; return; }
     if (now - t0 < 500000000) return;
     double s = (now - t0) / 1e9;
-    char title[128];
-    snprintf(title, sizeof title, "UltraTears  |  game %.1f fps  |  shown %.1f fps", (game - game0) / s, (shown - shown0) / s);
+    char title[640];
+    snprintf(title, sizeof title, "%s  |  game %.1f fps  |  shown %.1f fps", game_meta_title(), (game - game0) / s, (shown - shown0) / s);
     SDL_SetWindowTitle(window, title);
     t0 = now; game0 = game; shown0 = shown;
 }
