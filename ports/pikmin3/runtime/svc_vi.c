@@ -8,6 +8,7 @@ typedef struct { int used; u32 afmt; u32 nvmap_id; u32 w, h, stride, fmt, layout
 static Slot slots[64];
 static KEvent* g_vsync_ev; static KEvent* g_bufavail_ev;
 static PMutex g_vilock; static int g_connected;
+volatile u32 g_vi_swap=1;
 static int g_width=1280, g_height=720;
 static u64 g_present_count;
 static PCond g_free_cv;
@@ -83,6 +84,7 @@ static int binder_transact(u32 id, u32 code, PR* in, PW* out){
         for(u32 i=0;i<nf;i++){ u32 id,val; memcpy(&id,qi+0x34+i*8,4); memcpy(&val,qi+0x38+i*8,4); if(id!=0xFFFFFFFFu) syncpt_wait(id,val,100000000); } }
       if(len>=0x28){ extern volatile i32 g_vi_crop[4]; extern volatile u32 g_vi_transform; i32 cr[4]; memcpy(cr,qi+0x0C,16); for(int i=0;i<4;i++) g_vi_crop[i]=cr[i]; memcpy((void*)&g_vi_transform,qi+0x20,4);
         { static u32 lt=0xFFFFFFFFu; static i32 lc[4]; if(lt!=g_vi_transform || memcmp(lc,cr,16)){ lt=g_vi_transform; memcpy(lc,cr,16); LOG("vi: crop (%d,%d)-(%d,%d) transform %x\n",cr[0],cr[1],cr[2],cr[3],lt); } } }
+      if(len>=0x30){ u32 sw; memcpy(&sw,qi+0x2C,4); if(sw!=g_vi_swap){ g_vi_swap=sw; LOG("vi: swap interval %u\n",sw); } }   /* 2 = 30 fps (Pikmin 3) */
       if(slot>=0 && slot<64) present_slot(slot);
       pm_lock(&g_vilock); if(slot>=0 && slot<64) slots[slot].queued=0; pc_broadcast(&g_free_cv); pm_unlock(&g_vilock);
       kevent_signal(g_bufavail_ev);

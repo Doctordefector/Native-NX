@@ -114,6 +114,13 @@ static void rt_wfe(CPU* c){ (void)c; plat_yield(); }
 const RtAPI g_rtapi={swr_svc,rt_undef,rt_note_hint,rt_ticks,rt_brk,rt_fpcr,rt_sev,rt_wfe};
 
 /* ============================================================ system errors */
+static u64 game_fn_at(void* host_pc){ u64 best=0, ga=0; if(g_mod) for(u32 i=0;i<g_mod->nentries;i++){ u64 f=(u64)(size_t)g_mod->entry_fn[i]; if(f<=(u64)(size_t)host_pc && f>best){ best=f; ga=g_mod->entry_addr[i]; } }
+  return best && (u64)(size_t)host_pc-best<0x100000? ga : 0; }
+
+void watch_report(void* host_pc, u64 host_addr){ /* SWR_WATCH hit (plat.c) */
+  static volatile long n; if(n++>=64) return; KThread* t=kthread_cur(); u64 ga=host_addr-(u64)(size_t)g_mem;
+  logf_(0,"watch: [%llx]=%x written in game function %llx, lr=%llx thread %s\n",(unsigned long long)ga,*(u32*)(size_t)host_addr,(unsigned long long)game_fn_at(host_pc),
+    t? (unsigned long long)t->cpu.x[g_mod&&g_mod->a32? 14 : 30] : 0ull, t? t->name : "-"); }
 void crash_report(void* host_pc, void* fault, int sig){
   KThread* t=kthread_cur();
   u64 ga=(u64)((u8*)fault-g_mem);
@@ -196,7 +203,7 @@ static const IniOpt INI_GRAPHICS[]={
   {"shadows","1","0 = disable shadow maps (more FPS)"},
   {NULL,NULL,NULL}};
 static const IniOpt INI_PERF[]={
-  {"fps_limit","1","1 = 60 FPS (the speed of a Switch), 0 = unlimited (the game runs faster). Values under 60 are treated as 60: the game advances one step per image, so 30 meant half speed. F4 changes it in game"},
+  {"fps_limit","1","1 = the speed of a Switch (60 FPS, or 30 for games that ask for it), 0 = unlimited (the game runs faster). Values under 60 are treated as 60: the game advances one step per image, so 30 meant half speed. F4 changes it in game"},
   {"forced_vsync","0","1 = always wait for vsync (can lower FPS a lot on slow PCs)"},
   {"memory_gb","0","Memory the game sees: 0 = automatic (3.2 GB like the console, more for games that need it,\n;   e.g. Tears of the Kingdom), 4 = console (3.2 GB), 6 or 8 = extended (like yuzu's extended memory layout)"},
   {"low_priority_shader_compiler","1","1 = compile shaders at low priority (less stutter on weak CPUs)"},
@@ -290,15 +297,16 @@ void vi_show_buffer(u32 nvmap_id, u32 offset, u32 w, u32 h, u32 pitch, u32 layou
   }
   { static int once; if(!once){ once=1; if(getenv("SWR_VT")) vt_set(1); } }   /* test smooth clock w/o recording */
   g_frames++; vt_frame();
-  /* fps_limit: 1 = 60, otherwise N fps */
+  /* fps_limit: 1 = the Switch's pace (60 Hz vsync times the game's swap interval: 2 = 30 fps), otherwise N fps */
+  u64 swap= g_opt_fps==1 && g_vi_swap>=1 && g_vi_swap<=4? g_vi_swap : 1;
   /* in smooth recording the limiter has to count guest time, not real time.
      games that tick once per frame would otherwise run sped up in the video */
-  if(g_vt_on){ u64 per= g_opt_fps>=60 && g_opt_fps<=240? 1000000000ull/(u64)g_opt_fps : 16666667ull;
+  if(g_vt_on){ u64 per= g_opt_fps>=60 && g_opt_fps<=240? 1000000000ull/(u64)g_opt_fps : 16666667ull; per*=swap;
     static u64 last_g; u64 g=guest_ns(), next=last_g+per, t0=plat_ns();
     if(last_g && g<next && next-g<per*2){ while(g<next && plat_ns()-t0<1000000000ull){ plat_sleep_ns(500000); g=guest_ns(); } }
     g=guest_ns(); last_g= (last_g && g-last_g<2*per)? next : g; g_last_present=plat_ns(); return; }
   /* while recording keep at least the 60 cap, uncapped + per-frame logic = sped up video */
-  if(g_opt_fps || g_rec_active){ u64 per= g_opt_fps>=60 && g_opt_fps<=240? 1000000000ull/(u64)g_opt_fps : 16666667ull;
+  if(g_opt_fps || g_rec_active){ u64 per= g_opt_fps>=60 && g_opt_fps<=240? 1000000000ull/(u64)g_opt_fps : 16666667ull; per*=swap;
     if(g_opt_fps>=10 && g_opt_fps<60){ static int said; if(!said){ said=1; WARN("fps_limit=%d would run the game at %d%% speed (one game step per image): using 60\n",g_opt_fps,g_opt_fps*100/60); } }
     u64 now=plat_ns(); u64 next=g_last_present+per;
     if(g_last_present && now<next) plat_sleep_ns((i64)(next-now));
@@ -375,16 +383,18 @@ int swr_main(int argc, char** argv){
   if(load_code()) fatal("Could not load the game's recompiled code.");
   if(g_mod->abi!=1) fatal("The recompiled code is from another SwitchRecomp version.");
   g_title_id=g_mod->title_id;
-  mem_layout(g_mod->a32);
+  int as_type=0;
+  { /* npdm SystemResourceSize; newer SDKs only init their VM allocator when > 0 */
+    extern u64 g_sysres_size; char q[1200]; snprintf(q,sizeof q,"%sexefs/main.npdm",g_datadir); FILE* f=fopen(q,"rb");
+    if(f){ u8 h[0x20]; if(fread(h,1,0x20,f)==0x20 && !memcmp(h,"META",4)){ u32 v; memcpy(&v,h+0x14,4); g_sysres_size=v; as_type=(h[0xC]>>1)&7; } fclose(f); }
+  }
+  mem_layout(g_mod->a32,as_type);
   if(g_mod->a32) LOG("AArch32 game: 32-bit address space\n");
   mem_init(); kernel_init(); build_dispatch();
   if(g_mod->init) g_mod->init(&g_rtapi);
   load_hints();
   if(loader_load()) fatal("Could not load the game executables from %sexefs/",g_datadir);
-  { /* npdm SystemResourceSize; newer SDKs only init their VM allocator when > 0 */
-    extern u64 g_sysres_size; char q[1200]; snprintf(q,sizeof q,"%sexefs/main.npdm",g_datadir); FILE* f=fopen(q,"rb");
-    if(f){ u8 h[0x20]; if(fread(h,1,0x20,f)==0x20 && !memcmp(h,"META",4)){ u32 v; memcpy(&v,h+0x14,4); g_sysres_size=v; } fclose(f); }
-    LOG("npdm: system resource %.1f MB\n",g_sysres_size/1048576.0); }
+  { extern u64 g_sysres_size; LOG("npdm: system resource %.1f MB, address space type %d, heap region %llu MB\n",g_sysres_size/1048576.0,as_type,(unsigned long long)(HEAP_SIZE>>20)); }
   services_init(); romfs_init(); gpu_init();
   video_init(g_mod->title? g_mod->title : g_exename);
   { extern void plat_prof_start(int); if(g_opt_prof){ plat_prof_start(0); LOG("profile: active (profile.txt every 10 s)\n"); } }

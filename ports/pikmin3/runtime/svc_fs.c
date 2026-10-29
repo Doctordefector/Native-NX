@@ -324,6 +324,9 @@ static int fsp_disp(SvcObj* o, IpcCtx* c){
       /* System 0, Account 1, Bcat 2, Device 3, Temporary 4, Cache 5, SystemBcat 6 */
       const char* kind= type==1? "user" : (type==2||type==6)? "bcat" : type==3? "device" : type==5? "cache" : type==0? "system" : "temp";
       snprintf(p,sizeof p,"%ssave/%s",g_datadir,kind);
+      /* another program's save (e.g. a game looking for its demo's): its own folder, and fs ResultTargetNotFound (2002-1002) while it doesn't exist */
+      { u64 pid=in64(c,8); if(pid && pid!=g_title_id){ size_t l=strlen(p); snprintf(p+l,sizeof p-l,"/%016llx",(unsigned long long)pid);
+          if(!plat_is_dir(p)){ LOG("fs: save data of program %016llx: none\n",(unsigned long long)pid); return RC(2,1002); } } }
       /* older builds read the type from the wrong offset and kept every save in save/system:
          the first time an account or device save is opened, start it from a copy of that folder */
       if((type==1 || type==3) && !plat_is_dir(p)){ char old[1200]; snprintf(old,sizeof old,"%ssave/system",g_datadir);

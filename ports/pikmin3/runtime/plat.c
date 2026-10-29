@@ -68,12 +68,21 @@ int pc_wait(PCond* c, PMutex* m, i64 ns){
   return 0; }
 typedef struct { PThreadFn fn; void* arg; } TArg;
 
+/* debug: SWR_WATCH=<game hex addr> puts a hardware write watchpoint (4 bytes) on it in every game thread and logs who writes */
+static LONG WINAPI veh_watch(EXCEPTION_POINTERS* e){
+  if(e->ExceptionRecord->ExceptionCode!=EXCEPTION_SINGLE_STEP || !(e->ContextRecord->Dr6&1)) return EXCEPTION_CONTINUE_SEARCH;
+  extern void watch_report(void* host_pc, u64 host_addr); watch_report((void*)e->ContextRecord->Rip,e->ContextRecord->Dr0);
+  e->ContextRecord->Dr6=0; return EXCEPTION_CONTINUE_EXECUTION; }
+
 static unsigned __stdcall tstart(void* p){ TArg a=*(TArg*)p; free(p); a.fn(a.arg); return 0; }
 
 int plat_thread(PThreadFn fn, void* arg, size_t stack){
   TArg* a=malloc(sizeof *a); a->fn=fn; a->arg=arg;
-  uintptr_t h=_beginthreadex(NULL,(unsigned)stack,tstart,a,STACK_SIZE_PARAM_IS_A_RESERVATION,NULL);
+  uintptr_t h=_beginthreadex(NULL,(unsigned)stack,tstart,a,STACK_SIZE_PARAM_IS_A_RESERVATION|CREATE_SUSPENDED,NULL);
   if(!h) return -1;
+  { extern u8* g_mem; static u64 w=1; if(w==1){ const char* e=getenv("SWR_WATCH"); w= e? strtoull(e,0,16) : 0; if(w) AddVectoredExceptionHandler(1,veh_watch); }
+    if(w){ CONTEXT x={0}; x.ContextFlags=CONTEXT_DEBUG_REGISTERS; x.Dr0=(u64)(size_t)(g_mem+w); x.Dr7=1|(1u<<16)|(3u<<18); SetThreadContext((HANDLE)h,&x); } }
+  ResumeThread((HANDLE)h);
   { extern void plat_prof_add_thread(HANDLE); plat_prof_add_thread((HANDLE)h); }
   CloseHandle((HANDLE)h); return 0; }
 

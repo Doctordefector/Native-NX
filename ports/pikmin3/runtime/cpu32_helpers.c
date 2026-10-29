@@ -48,3 +48,12 @@ f32 a32_rsqrte(f32 x){ u32 v; memcpy(&v,&x,4); u32 s=v>>31, e=(v>>23)&0xFF, f=v&
   u32 sc= (e&1)? (0x80|(f>>16)) : (0x100|(f>>15));
   u32 est=a32_rsqrt_est(sc);
   return fbits(((380-e)/2)<<23|((est&0xFF)<<15)); }
+
+#ifdef A32_ABICHECK
+#include <stdio.h>
+void a32_abi_report(CPU* c, u32 site, u32 callee, const u32* b){
+  static int n; if(n++>=40) return;
+  static const int rr[9]={4,5,6,7,8,9,10,11,13}; char s[256]; int k=0;
+  for(int i=0;i<9;i++) if(R(rr[i])!=b[i]) k+=snprintf(s+k,sizeof s-k," r%d %x->%x",rr[i],b[i],R(rr[i]));
+  fprintf(stderr,"ABI: call at %x to %x changed%s\n",site,callee,s); fflush(stderr); }
+#endif

@@ -152,6 +152,14 @@ class Module:
                         self.funcs.add(val)
                 elif shn == 0 and name:
                     self.imports.append(name)
+        # DT_INIT / DT_FINI and the init/fini arrays: rtld calls them through pointers
+        for tag in (12, 13):
+            if d.get(tag) is not None and self.in_text(d[tag]): self.funcs.add(d[tag])
+        for at, sz in ((25, 27), (26, 28)):
+            if d.get(at) is None: continue
+            for o in range(d[at], d[at] + d.get(sz, 0), 4):
+                v = self.word(o)
+                if v is not None and self.in_text(v): self.relptrs.add(v)
         # REL relocs pointing into code (vtables, callbacks): the addend is the word at r_offset
         self.thumbptrs = set()
         for rt, rs in ((17, 18), (0x17, 2)):           # DT_REL/RELSZ, DT_JMPREL/PLTRELSZ
@@ -160,7 +168,9 @@ class Module:
             for o in range(base, base + size, 8):
                 if o + 8 > len(self.image): break
                 r_off, r_info = struct.unpack_from('<II', self.image, o)
-                if r_info & 0xFF == 23:                # R_ARM_RELATIVE
+                # R_ARM_RELATIVE, and JUMP_SLOT / GLOB_DAT / ABS32 whose initial value points into this module's
+                # text (lazy PLT: GOT entries start at the PLT header)
+                if r_info & 0xFF in (23, 22, 21, 2):
                     v = self.word(r_off)
                     if v is None: continue
                     if v & 1 and self.text[0] <= v - 1 < self.text[0] + self.text[1]: self.thumbptrs.add(v - 1)

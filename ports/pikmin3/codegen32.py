@@ -79,29 +79,84 @@ class Program32:
         if w is None: return None
         if w & 0x0FF0FFF0 == 0x0080F000:                               # ADD pc, rA, rB
             ra, rb = (w >> 16) & 15, w & 15
-            wl = self.word(x - 4)
-            if wl is None or wl & 0x0FF00FF0 != 0x07900100 or (wl >> 16) & 15 != ra or (wl >> 12) & 15 != rb: return None
-            rx = wl & 15; kind = 'rel'
+            rx = None
+            for k in range(1, 9):                                      # the load may be scheduled earlier
+                wl = self.word(x - 4 * k)
+                if wl is None: break
+                if wl & 0x0FF00FF0 == 0x07900100 and (wl >> 12) & 15 == rb:
+                    if (wl >> 16) & 15 != ra: return None
+                    rx = wl & 15; break
+                if (wl >> 12) & 15 == rb and wl & 0x0C000000 == 0: return None
+            if rx is None: return None
+            kind = 'rel'
         elif w & 0x0FF0FFF0 == 0x0790F100:                             # LDR pc, [rA, rX, lsl #2]
             ra, rx = (w >> 16) & 15, w & 15; kind = 'abs'
         else:
             return None
         base = None
-        for k in range(1, 6):
+        for k in range(1, 12):
             wa = self.word(x - 4 * k)
             if wa is not None and wa & 0x0FFFF000 == 0x028F0000 | (ra << 12):   # ADD rA, pc, #K
                 base = x - 4 * k + 8 + a32.armexpand(wa & 0xFFF); break
         if base is None: return None
-        n = self.table_bound(x, rx, 12)
-        if n is None or n > 4096: return None
+        n = self.table_bound(x, rx, 24)
+        if n is not None and n > 4096: return None
         ents = []
-        for i in range(n):
+        for i in range(n or 1024):
             v = self.word(base + 4 * i)
-            if v is None: return None
+            if v is None: break
             t = (base + v) & 0xFFFFFFFF if kind == 'rel' else (m.base + v) & 0xFFFFFFFF
-            if t & 3 or not self.mod_of(t): return None
+            ok = not t & 3 and self.mod_of(t) and (n is not None or abs(t - x) < 0x10000)
+            if not ok:
+                if n is None and ents: break
+                return None
             ents.append(t)
         return ents
+
+    def adr_ladder(self, x):
+        """'add rX, pc, #K; (adjust rX); bx rX' into an unrolled ladder ending at the ADR target (__udivsi3):
+        every instruction of the run of plain instructions before the target is an entry"""
+        w = self.word(x)
+        if w is None: return None
+        if w & 0x0FFFFFF0 == 0x012FFF10: rx = w & 15                   # BX rX
+        elif w & 0x0FFFFFF0 == 0x01A0F000: rx = w & 15                 # MOV pc, rX
+        else: return None
+        t = None
+        for k in range(1, 9):
+            wa = self.word(x - 4 * k)
+            if wa is None: break
+            if wa & 0x0FFFF000 == 0x028F0000 | (rx << 12): t = x - 4 * k + 8 + a32.armexpand(wa & 0xFFF); break
+        if t is None or t <= x or t - x > 0x1000 or not self.mod_of(t): return None
+        y = t - 4
+        while y > x:
+            r = self.decode(y)[1]
+            if not isinstance(r, str): break
+            y -= 4
+        return list(range(y + 4, t + 4, 4))
+
+    def pc_rel_target(self, x, w):
+        """code addresses built pc-relative (PIC function pointers): 'add/sub rd, pc, #imm' and
+        'ldr rm, [pc, #k]; ... add rd, pc, rm'. Only targets inside .text count."""
+        t = None
+        if w >> 28 == 15: return None
+        if w & 0x0FFF0000 == 0x028F0000: t = x + 8 + a32.armexpand(w & 0xFFF)
+        elif w & 0x0FFF0000 == 0x024F0000: t = x + 8 - a32.armexpand(w & 0xFFF)
+        elif w & 0x0FFF0FF0 == 0x008F0000:
+            rm = w & 15
+            for k in range(1, 9):
+                wl = self.word(x - 4 * k)
+                if wl is None: break
+                if wl & 0x0F7FF000 == 0x051F0000 | (rm << 12):          # LDR rm, [pc, #+-imm12]
+                    la = x - 4 * k + 8 + ((wl & 0xFFF) if wl & (1 << 23) else -(wl & 0xFFF))
+                    lv = self.word(la)
+                    if lv is None:
+                        m = self.mod_of(x); o = la - m.base
+                        lv = int.from_bytes(m.image[o:o + 4], 'little') if 0 <= o <= len(m.image) - 4 else None
+                    if lv is not None: t = (x + 8 + lv) & 0xFFFFFFFF
+                    break
+                if (wl >> 12) & 15 == rm and wl & 0x0C000000 == 0: break   # rm overwritten by data processing
+        if t is None or t & 3 or not self.mod_of(t): return None
+        return t
 
     def explore(self, a, stops):
         seen = set(); todo = [a]; calls = []; far = []
@@ -114,6 +169,8 @@ class Program32:
                 seen.add(x)
                 if r is None: break
                 if isinstance(r, str):
+                    t = self.pc_rel_target(x, w)
+                    if t is not None: far.append(t)
                     x += 4; continue
                 k = r[0]
                 if k == 'bc':
@@ -127,13 +184,17 @@ class Program32:
                     break
                 elif k == 'bl':
                     if self.mod_of(r[1]): calls.append(r[1])
+                    if r[1] == x + 8:     # 'bl over a literal; ldr rN, [lr]; add rN, rN, lr': pointer = &word + word
+                        lv = self.word(x + 4)
+                        t = (x + 4 + lv) & 0xFFFFFFFF if lv is not None else 1
+                        if not t & 3 and self.mod_of(t): far.append(t)
                 elif k == 'jt':
                     ents = self.jt_entries(x, r[1]); self.jt[x] = ents
                     todo.extend(ents)
                     if r[2] is None: break
                 elif k in ('br', 'ret'):
                     if k == 'br':
-                        ents = self.reg_tables(x)
+                        ents = self.reg_tables(x) or self.adr_ladder(x)
                         if ents:
                             self.jt[x] = ents
                             todo.extend(t for t in ents if t not in stops)
@@ -201,7 +262,11 @@ class Program32:
                     elif k in ('bl', 'blr', 'svc'): L.add(x + 4)
                     elif k == 'jt': L.update(self.jt.get(x, ())); L.add(x + 4); f.has_br = True
                     elif k in ('br', 'ret', 'brk'):
-                        if k == 'br': f.has_br = True; L.update(self.jt.get(x, ()))
+                        if k == 'br':
+                            f.has_br = True; L.update(self.jt.get(x, ()))
+                            # 'add pc, pc, rX, <shift>' computed jump (unrolled ladders: __udivmodsi4): any later
+                            # instruction of the function can be the target
+                            if (self.word(x) or 0) & 0x0FFFF010 == 0x008FF000: L.update(y for y in f.addrs if y >= x + 8)
                         if r[2] is None: prev_term = True
             L.update(x for x in f.addrs if x in targets or x in self.hints)
             f.leaders = {x for x in L if x in s}
@@ -248,9 +313,9 @@ def emit_function(prog, f, funcs):
             elif k == 'bc':
                 out.append(' if(%s) %s' % (r[1], tail(r[2])))
             elif k == 'bl':
-                out.append(' ' + cnd(r[2], 'c->x[14]=%s; %s if(UNLIKELY(c->pc!=%s)) return;' % (lit(nxt), call(r[1]), lit(nxt))))
+                out.append(' ' + cnd(r[2], '{ ABI_SAVE(); c->x[14]=%s; %s if(UNLIKELY(c->pc!=%s)) return; ABI_CHECK(%s,%s); }' % (lit(nxt), call(r[1]), lit(nxt), lit(x), lit(r[1]))))
             elif k == 'blr':
-                out.append(' ' + cnd(r[2], '{ u32 t_=%s; c->x[14]=%s; CALLDYN(t_); if(UNLIKELY(c->pc!=%s)) return; }' % (r[1], lit(nxt), lit(nxt))))
+                out.append(' ' + cnd(r[2], '{ u32 t_=%s; ABI_SAVE(); c->x[14]=%s; CALLDYN(t_); if(UNLIKELY(c->pc!=%s)) return; ABI_CHECK(%s,t_); }' % (r[1], lit(nxt), lit(nxt), lit(x))))
             elif k == 'br':
                 out.append(' ' + cnd(r[2], '{ %s %s }' % (r[3], jump(r[1]))) if r[3] else ' ' + cnd(r[2], jump(r[1])))
                 term = r[2] is None
