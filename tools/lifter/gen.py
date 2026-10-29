@@ -174,6 +174,7 @@ class Module:
         off_reg = add.reg_name(add.operands[2].reg)
         shift = add.operands[2].shift.value if add.operands[2].shift.type else 0
         values = {}   # register -> constant from adr / adrp+add before the add
+        loads = ('ldrb', 'ldrh', 'ldrsb', 'ldrsh', 'ldrsw', 'ldr')
 
         def scan_back(reg, before):
             for x in window:
@@ -186,15 +187,30 @@ class Module:
                     continue
                 return x, i
             return None, None
+        def offset_load(reg):
+            x, i = scan_back(reg.replace('x', 'w'), add.address)
+            if i is None:
+                x, i = scan_back(reg.replace('w', 'x'), add.address)
+            return x, i
         x, i = scan_back(base_reg, add.address)
-        if i is None or i.mnemonic != 'adr':
+        base = None   # None: the entries are offsets from the table itself
+        if i is not None and i.mnemonic == 'adr':
+            base = i.operands[1].imm
+            x, i = offset_load(off_reg)
+        elif not shift:
+            # [Pikmin 4] table-relative entries (ICU SimpleDateFormat::subFormat, main 0x800730690: `adrp x8; add x8, x8,
+            # #0xc40; ldrsw x9, [x8, x9, lsl #2]; add x8, x9, x8; br x8`): one add operand is the loaded entry, the other
+            # the table address the load indexed
+            for o_reg, t_reg in ((base_reg, off_reg), (off_reg, base_reg)):
+                x, i = offset_load(o_reg)
+                if i is not None and i.mnemonic in loads and i.operands[1].type == capstone.arm64.ARM64_OP_MEM \
+                        and i.reg_name(i.operands[1].mem.base) == t_reg:
+                    break
+            else:
+                return None
+        else:
             return None
-        base = i.operands[1].imm
-        # the load of the offset
-        x, i = scan_back(off_reg.replace('x', 'w'), add.address)
-        if i is None:
-            x, i = scan_back(off_reg.replace('w', 'x'), add.address)
-        if i is None or i.mnemonic not in ('ldrb', 'ldrh', 'ldrsb', 'ldrsh', 'ldrsw', 'ldr'):
+        if i is None or i.mnemonic not in loads:
             return None
         mem = i.operands[1]
         if mem.type != capstone.arm64.ARM64_OP_MEM or not mem.mem.index:
@@ -229,6 +245,8 @@ class Module:
         if pi is None or pi.mnemonic != 'adrp':
             return None
         table = pi.operands[1].imm + ti.operands[2].imm
+        if base is None:
+            base = table
         lo, hi = self.base, self.base + len(self.nso.image)
         # [Pikmin 4] the bounds check on the index register near the load (`cmp wI, #n; b.hi`): the table's n + 1 entries
         # (self._scan_bounded; jump_table compares them with the emulation's). The result stays the scan of up to 4096.
