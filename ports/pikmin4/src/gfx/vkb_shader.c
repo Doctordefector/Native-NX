@@ -551,6 +551,86 @@ static void capture_shader(const char *key, uint32_t stage, const uint8_t *contr
     static unsigned n; if (++n % 100 == 1) VLOG("shader capture: %u shaders written to %s", n, dir);
 }
 
+/* [Pikmin 4] A shader with no translation is translated while the game runs when the translator is at hand
+   (TOTK_SHADER_XLATE, default data/shaders/ultrs-shaders.exe): the job shaders_from_capture.py would write, sent to one
+   ultrs-shaders --serve kept open, whose <key>.spv and <key>.res.json land in the shader folder. A game folder copied to
+   another PC then draws areas never visited on this one, without Python. Called with g_mu held. */
+static void json_path(char *out, size_t n, const char *p) {   // a path as a JSON string body (backslashes escaped)
+    size_t o = 0;
+    for (; *p && o + 2 < n; p++) { if (*p == '\\' || *p == '"') out[o++] = '\\'; out[o++] = *p; }
+    out[o] = 0;
+}
+static int translate_live(const char *key, uint32_t stage, const uint8_t *control, const uint8_t *code, uint32_t length) {
+    static int state;   // 0: not started, 1: running, -1: unavailable
+    static HANDLE in_w, out_r;
+    if (state < 0) return 0;
+    if (!state) {
+        const char *exe = getenv("TOTK_SHADER_XLATE");
+        if (!exe) exe = "data/shaders/ultrs-shaders.exe";
+        if (GetFileAttributesA(exe) == INVALID_FILE_ATTRIBUTES) { state = -1; return 0; }
+        SECURITY_ATTRIBUTES sa = {sizeof sa, NULL, TRUE};
+        HANDLE in_r, out_w;
+        if (!CreatePipe(&in_r, &in_w, &sa, 0) || !CreatePipe(&out_r, &out_w, &sa, 0)) { state = -1; return 0; }
+        SetHandleInformation(in_w, HANDLE_FLAG_INHERIT, 0);
+        SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0);
+        STARTUPINFOA si = {sizeof si};
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdInput = in_r; si.hStdOutput = out_w; si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+        PROCESS_INFORMATION pi;
+        char cmd[1200];
+        snprintf(cmd, sizeof cmd, "\"%s\" --serve", exe);
+        BOOL ok = CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+        CloseHandle(in_r); CloseHandle(out_w);
+        if (!ok) { VLOG("shader translator %s: cannot start (%lu)", exe, GetLastError()); state = -1; return 0; }
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        VLOG("shader translator %s: translating new shaders while the game runs", exe);
+        state = 1;
+    }
+    static const char *const names[] = {[0] = "vs", [1] = "ps", [2] = "gs", [5] = "cs"};
+    uint32_t c1off;
+    memcpy(&c1off, control + 0x700, 4);
+    uint32_t start = stage == 5 ? 0 : 0x30;
+    if (c1off > length || start > length) return 0;
+    uint32_t local[3] = {0}, shared = 0;
+    if (stage == 5) {   // thread group and shared memory from the control section, as nxnative's shader_split.py
+        memcpy(local, control + 0x748, 12);
+        if (!local[0] || !local[1] || !local[2]) return 0;
+        memcpy(&shared, control + 0x754, 4);
+        shared = (shared + 15) / 16 * 16;
+    }
+    char dir[1100], path[1200], esc[2400], out[2400];
+    snprintf(dir, sizeof dir, "%s-code", cache_dir());
+    CreateDirectoryA(dir, NULL);
+    snprintf(path, sizeof path, "%s/%s.code", dir, key);
+    FILE *f = fopen(path, "wb");
+    if (!f) return 0;
+    fwrite(code + start, 1, length - start, f);
+    fclose(f);
+    json_path(esc, sizeof esc, path);
+    json_path(out, sizeof out, cache_dir());
+    int totk_depth_near_minus_w(void);
+    size_t cap = 4096 + (size_t)(length - c1off) * 2;
+    char *job = malloc(cap);
+    if (!job) return 0;
+    int n = snprintf(job, cap, "{\"job\": {\"key\": \"%s\", \"stage\": \"%s\", \"code\": \"%s\", \"c1\": \"", key, names[stage], esc);
+    static const char hex[] = "0123456789abcdef";
+    for (uint32_t i = c1off; i < length; i++) { job[n++] = hex[code[i] >> 4]; job[n++] = hex[code[i] & 15]; }
+    n += snprintf(job + n, cap - n, "\", \"depth_minus_w\": %s, \"tex\": {}, \"img\": {}, \"attr\": {}, \"fout\": {}",
+                  totk_depth_near_minus_w() ? "true" : "false");
+    if (stage == 5) n += snprintf(job + n, cap - n, ", \"local\": [%u, %u, %u], \"shared\": %u", local[0], local[1], local[2], shared);
+    n += snprintf(job + n, cap - n, "}, \"out\": \"%s\"}\n", out);
+    DWORD done;
+    BOOL wrote = WriteFile(in_w, job, (DWORD)n, &done, NULL) && done == (DWORD)n;
+    free(job);
+    char reply[512];
+    size_t r = 0;
+    while (wrote && r + 1 < sizeof reply && ReadFile(out_r, reply + r, 1, &done, NULL) && done && reply[r] != '\n') r++;
+    reply[r] = 0;
+    if (!wrote || !done) { VLOG("shader translator stopped: new shaders stay untranslated"); state = -1; return 0; }
+    if (strncmp(reply, "ok ", 3)) { VLOG("shader %s: translation failed: %.200s", key, reply); return 0; }
+    return 1;
+}
+
 const vkb_shader *vkb_shader_get(const NVNshaderData *sd) {
     const uint8_t *control = sd->control;
     static _Atomic int said_null, said_bad;   /* [Pikmin 4] why a stage has no shader (these paths capture nothing) */
@@ -577,6 +657,10 @@ const vkb_shader *vkb_shader_get(const NVNshaderData *sd) {
         e->sh.key = e->key;
         uint64_t t0 = runtime_now_ns();
         int ok = load(&e->sh, key, (int)stage);
+        if (!ok && translate_live(key, stage, control, (const uint8_t *)(uintptr_t)sd->data, length)) {
+            ok = load(&e->sh, key, (int)stage);
+            static unsigned made; if (++made % 50 == 1) VLOG("shader translator: %u new shaders translated", made);
+        }
         vkb_shader_load_ns += runtime_now_ns() - t0;
         if (ok) {
             g_loaded++;
