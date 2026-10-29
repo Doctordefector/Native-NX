@@ -30,15 +30,15 @@ void a32_permute(int kind, int es, int ne, const u8* a, const u8* b, u8* out){
     for(int i=0;i+1<ne;i+=2){ memcpy(out+(i+1)*es,b+i*es,es); memcpy(out+(ne+i)*es,a+(i+1)*es,es); } } }
 
 /* ARMv7 FPRecipEstimate / FPRSqrtEstimate (8-bit tables computed as in the ARM ARM; FZ, default NaN) */
-static u32 recip_est(u32 a){ a=a*2+1; u32 b=(1u<<19)/a; return (b+1)>>1; }
-static u32 rsqrt_est(u32 a){ if(a<256) a=a*2+1; else { a=(a>>1)<<1; a=(a+1)*2; }
+static u32 a32_recip_est(u32 a){ a=a*2+1; u32 b=(1u<<19)/a; return (b+1)>>1; }
+static u32 a32_rsqrt_est(u32 a){ if(a<256) a=a*2+1; else { a=(a>>1)<<1; a=(a+1)*2; }
   u32 b=512; while((u64)a*(b+1)*(b+1) < (1ull<<28)) b++; return (b+1)>>1; }
 static f32 fbits(u32 v){ f32 f; memcpy(&f,&v,4); return f; }
 f32 a32_recpe(f32 x){ u32 v; memcpy(&v,&x,4); u32 s=v&0x80000000u, e=(v>>23)&0xFF, f=v&0x7FFFFF;
   if(e==0xFF) return f? fbits(0x7FC00000u) : fbits(s);
   if(e==0) return fbits(s|0x7F800000u);
   if(e>=253) return fbits(s);
-  u32 est=recip_est(0x100|(f>>15));
+  u32 est=a32_recip_est(0x100|(f>>15));
   return fbits(s|((253-e)<<23)|((est&0xFF)<<15)); }
 f32 a32_rsqrte(f32 x){ u32 v; memcpy(&v,&x,4); u32 s=v>>31, e=(v>>23)&0xFF, f=v&0x7FFFFF;
   if(e==0xFF && f) return fbits(0x7FC00000u);
@@ -46,5 +46,5 @@ f32 a32_rsqrte(f32 x){ u32 v; memcpy(&v,&x,4); u32 s=v>>31, e=(v>>23)&0xFF, f=v&
   if(s) return fbits(0x7FC00000u);
   if(e==0xFF) return fbits(0);
   u32 sc= (e&1)? (0x80|(f>>16)) : (0x100|(f>>15));
-  u32 est=rsqrt_est(sc);
+  u32 est=a32_rsqrt_est(sc);
   return fbits(((380-e)/2)<<23|((est&0xFF)<<15)); }

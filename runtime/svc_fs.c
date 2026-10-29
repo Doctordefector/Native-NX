@@ -112,6 +112,7 @@ void romfs_init(void){
   pm_init(&g_romlock);
   char p[1200];
   if(nrch){ rtotal=0; for(int i=0;i<nrch;i++) rtotal+=rch[i].len; LOG("RomFS: inside the APK, %d parts (%.1f MB)\n",nrch,(double)rtotal/1048576.0); return; }
+  if(!g_romfs_dir_override[0] && getenv("SWR_ROMFS")) strncpy(g_romfs_dir_override,getenv("SWR_ROMFS"),sizeof g_romfs_dir_override-1);   /* use an extracted RomFS in place */
   if(g_romfs_dir_override[0] && plat_is_dir(g_romfs_dir_override)){ LOG("RomFS: %s\n",g_romfs_dir_override); romfs_build(g_romfs_dir_override); return; }
   snprintf(p,sizeof p,"%sromfs.bin",g_datadir); rraw=fopen(p,"rb");
   if(rraw){ rtotal=plat_file_size(p); LOG("RomFS: image %s (%.1f MB)\n",p,(double)rtotal/1048576.0); return; }

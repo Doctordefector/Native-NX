@@ -69,16 +69,21 @@ void logf_(int lvl, const char* fmt, ...);
 void fatal(const char* fmt, ...);
 
 /* ======================================================= address space */
-#define AS_SIZE        0x2000000000ull
-#define AS_BASE        0x08000000ull
-#define HEAP_BASE      0x100000000ull
-#define HEAP_SIZE      0x200000000ull
-#define ALIAS_BASE     0x300000000ull
-#define ALIAS_SIZE     0x1000000000ull
-#define STACK_BASE     0x1300000000ull
-#define STACK_SIZE     0x100000000ull
-#define KERN_BASE      0x1400000000ull    /* TLS, kernel stacks, our own shmem */
-#define KERN_END       0x1800000000ull
+/* 64-bit games get the 39-bit layout, 32-bit games (g_a32) one that fits under 4 GB: see mem_layout() */
+#define AS_RESERVE     0x2000000000ull    /* host reservation, the same for both */
+extern u64 g_as_size, g_as_base, g_heapr_base, g_heapr_size, g_alias_base, g_alias_size, g_stack_base, g_stack_size, g_kern_base, g_kern_end;
+extern int g_a32;
+#define AS_SIZE        g_as_size
+#define AS_BASE        g_as_base
+#define HEAP_BASE      g_heapr_base
+#define HEAP_SIZE      g_heapr_size
+#define ALIAS_BASE     g_alias_base
+#define ALIAS_SIZE     g_alias_size
+#define STACK_BASE     g_stack_base
+#define STACK_SIZE     g_stack_size
+#define KERN_BASE      g_kern_base        /* TLS, kernel stacks, our own shmem */
+#define KERN_END       g_kern_end
+void mem_layout(int a32);
 
 enum { MS_FREE=0x00000000, MS_IO=0x00182001, MS_STATIC=0x00042002, MS_CODE=0x04DC7E03, MS_CODEDATA=0x07FEBD04,
   MS_NORMAL=0x077EBD05, MS_SHARED=0x04402006, MS_ALIASCODE=0x04DD7E08, MS_ALIASCODEDATA=0x07FFBD09, MS_IPC=0x045C3C0A,
@@ -249,6 +254,7 @@ typedef struct SwrModule {
   u32 main_stack, main_prio, main_core;
   void (*init)(const RtAPI* rt);
   u64 (*step)(CPU* c, u32 w, u64 pc);
+  u32 a32;          /* AArch32 game: r0-r15 in x[0..15], SVC32 ABI, 32-bit address space */
 } SwrModule;
 extern const SwrModule* g_mod;
 extern GuestFn* g_disp;

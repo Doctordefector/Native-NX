@@ -123,6 +123,7 @@ KThread* kthread_create(u64 entry, u64 arg, u64 stack_top, int prio, int core){
   CPU* c=&t->cpu; memset(c,0,sizeof *c);
   c->mem=g_mem; c->disp=g_disp; c->code_lo=g_code_lo; c->code_hi=g_code_hi; c->rt=&g_rtapi; c->thread=t;
   c->tpidrro=t->tls; c->x[0]=arg; c->x[31]=stack_top; c->pc=entry;
+  if(g_a32){ c->x[13]=stack_top; c->x[31]=0; }
   return t;
 }
 
@@ -607,7 +608,29 @@ extern KShmem* kshmem_new(u64 size, const char* name);
 
 static void swr_svc_(CPU* c, u32 imm);
 
+#include "svc32_tab.h"
+/* AArch32 SVC: r0-r7 -> the 64-bit layout swr_svc_ works on (input parameter i in x[i], result in x[0], output k in
+   x[1+k]), then outputs back to their r registers. Registers that are not outputs keep their value. */
+static void svc32(CPU* c, u32 imm){
+  const Svc32Abi* a= imm<0x80? &g_svc32[imm] : NULL;
+  if(!a || !a->name){ WARN("SVC32 0x%x unknown (pc=%llx)\n",imm,(unsigned long long)c->pc); c->x[0]=R_NOTIMPL; return; }
+  u64 r[8]; for(int i=0;i<8;i++) r[i]=(u32)c->x[i];
+  u64 x8[8]={0};
+  for(int i=0;i<a->np;i++){ if(a->isout[i]) continue; int lo=a->r[i][0], hi=a->r[i][1];
+    x8[i]= (lo>=0? r[lo] : 0) | (hi>=0? r[hi]<<32 : 0); }
+  for(int i=0;i<8;i++) c->x[i]=x8[i];
+  swr_svc_(c,imm);
+  u64 o[8]; for(int i=0;i<8;i++) o[i]=c->x[i];
+  for(int i=0;i<8;i++) c->x[i]=r[i];
+  c->x[0]=(u32)o[0];
+  for(int i=0,k=1;i<a->np;i++){ if(!a->isout[i]) continue; int lo=a->r[i][0], hi=a->r[i][1];
+    if(lo>=0) c->x[lo]=(u32)o[k]; if(hi>=0) c->x[hi]=(u32)(o[k]>>32); k++; } }
+
 void swr_svc(CPU* c, u32 imm){
+  if(g_a32){ u64 a0=c->x[0],a1=c->x[1],a2=c->x[2],a3=c->x[3]; svc32(c,imm);
+    if(imm!=0x1E && imm!=0x0B && imm!=0x10){ u32 i=__atomic_fetch_add(&g_svc_ring_n,1,__ATOMIC_RELAXED)&63; SvcRec* rr=&g_svc_ring[i];
+      rr->imm=imm; rr->lr=c->x[14]; rr->a[0]=a0; rr->a[1]=a1; rr->a[2]=a2; rr->a[3]=a3; rr->res=(u32)c->x[0]; rr->o1=c->x[1]; }
+    return; }
   u64 a0=c->x[0],a1=c->x[1],a2=c->x[2];
   u64 a3=c->x[3];
   swr_svc_(c,imm);

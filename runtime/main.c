@@ -375,6 +375,8 @@ int swr_main(int argc, char** argv){
   if(load_code()) fatal("Could not load the game's recompiled code.");
   if(g_mod->abi!=1) fatal("The recompiled code is from another SwitchRecomp version.");
   g_title_id=g_mod->title_id;
+  mem_layout(g_mod->a32);
+  if(g_mod->a32) LOG("AArch32 game: 32-bit address space\n");
   mem_init(); kernel_init(); build_dispatch();
   if(g_mod->init) g_mod->init(&g_rtapi);
   load_hints();
