@@ -2,6 +2,9 @@
 
 A guide for any agent starting a new port here, such as Pikmin 3 Deluxe. Read it before you touch anything.
 
+**Status:** Pikmin 4 (`ports\pikmin4`) is playable, confirmed by the owner. Its `PORTING.md` has the history and
+the debugging methods that worked. Pikmin 3 Deluxe has not been started; see the `work\` section below.
+
 ## Ground rules from the owner (non-negotiable)
 
 1. **Keep everything in `T:\Dev\Switch PC Recomps`. Never write to C:.** Temp files, caches, pip, NuGet, pycache and
@@ -70,7 +73,7 @@ A guide for any agent starting a new port here, such as Pikmin 3 Deluxe. Read it
 ```
 extract\ExeFS\      main, main.npdm, rtld, sdk, subsdk0   (decrypted NSOs)
 extract\RomFS\      game data; romfs_manifest.tsv, control.nacp, icon.jpg sit beside them
-lift\main, lift\sdk, lift\subsdk0   lifted C (one file per function group); lift\main_old = previous lift
+lift\main, lift\sdk, lift\subsdk0   lifted C (one file per function group)
 shaders\raw\        shaders captured at runtime (TOTK_SHADER_CAPTURE)
 shaders\ryujinx\    translated .spv the port loads (TOTK_SHADER_DIR)
 shaders\depth_mode.txt   "zero" for Pikmin 4 (NVN depth mode NEAR_IS_ZERO)
@@ -108,6 +111,11 @@ set ULTRS_CLANG64=T:\Dev\Switch PC Recomps\refs\ultratears\deps\clang64\bin
 ..\..\.venv\Scripts\python.exe tools\build_game.py --generated ..\..\work\<titleID>\lift --target ultratears --cpus 10
 ```
 
+### Keeping the working folder lean
+
+After a task, delete scratch files in `.cache\tmp`, old lift copies (`lift\main_new`, `main_old`), extra
+`run\*.log` files and test save copies (`run\saves_*`). Keep `run\saves`, `run\visual.log` and `run\hub.log`.
+
 ### Running a port
 
 Copy `Pikmin 4 native test.bat`. It sets `TOTK_SHADER_CAPTURE`, `TOTK_SHADER_DIR`, `TOTK_PROFILE_DIR` and
@@ -138,6 +146,21 @@ Keyboard controls in game: W/A/S/D move, J=A, K=B, I=X, U=Y, Enter=+, Tab or Esc
   the CPU writes texels, for example movie frames.
 - Unreal Engine games (Pikmin 4) keep their shaders in the pak. They're captured at runtime and translated after the
   run, so each session fills in more of the game. Pikmin 3 Deluxe isn't Unreal, so check how it stores shaders.
+- Texture-to-texture copies between RGBA8 and BGRA8 must convert, because NVN's copy does. Copied as raw bytes, red
+  and blue swap (Pikmin 4's title movie went blue). See `vkb_copy.c` and `rgba8_family`.
+- Movies loop by Flush + Start. A flush must not hand out again an input the game still holds, and no input is given
+  after end of stream (nxnative `md_reset`). Otherwise the loop stalls on a black clip.
+- To check a movie's true colours, dump its packets (`TOTK_MOVIE_IVF=<dir>`) and decode them with ffmpeg.
+- "no function at X" means a jump table the lifter missed. The image scan in `tools\lifter\gen.py` handles `adr`-based
+  tables, tables through register copies, and table-relative `ldrsw` tables. After any lifter change, re-lift into a
+  new folder, compare the function and label sets with the old lift (no function may be lost), then copy only the
+  changed files into `lift\main`.
+  - A re-lift moves the file boundaries, so expect a near-full rebuild of about 30 minutes.
+  - `build_game.py --cpus` above the machine's core count fails with "SetProcessAffinityMask failed".
+- Git Bash rewrites environment variables that look like `/t/...` paths. Pass Windows paths (`T:/...`) to
+  `TOTK_SHOT` and similar settings.
+- Don't name a scratch script after a Python module (such as `dis.py`), because it breaks imports. Keep scratch work in
+  `.cache\tmp` and delete it when you're done.
 - Compute shaders need the thread-group size from the NVN shader control (+0x748, three u32 values) and the shared
   memory size from +0x754, as nxnative's `shader_split.py` reads them.
 
