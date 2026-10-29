@@ -914,6 +914,33 @@ static void mirrors_prepare_fixed(int indexed, const p_draw_idx *di) {
     }
 }
 
+// [Pikmin 4] development: TOTK_CBUF_LOG=<present>:<shader key prefix>: once, at the first use of that shader from that
+// present on, its constants (c1) and the uniform buffers it binds (c3..: the first 32 floats, and c3's vec4 128..143)
+__declspec(dllimport) int __stdcall IsBadReadPtr(const void *p, uintptr_t n);
+static void cbuf_log(const vkb_shader *sh, int stage) {
+    static long long at = -1; static char key[65]; static int done;
+    if (at == -1) { const char *e = getenv("TOTK_CBUF_LOG"); at = e ? atoll(e) : 0; const char *k = e ? strchr(e, ':') : NULL; if (k) snprintf(key, sizeof key, "%s", k + 1); else at = 0; }
+    if (done || at <= 0 || vkb_frame() < (uint64_t)at || !sh->key || strncmp(sh->key, key, strlen(key))) return;
+    done = 1;
+    char line[2048]; int n;
+    n = snprintf(line, sizeof line, "[cbuf] %.12s c1 (%u bytes):", sh->key, sh->c1_size);
+    for (uint32_t i = 0; sh->c1 && i < sh->c1_size / 4 && i < 32; i++) { float f; memcpy(&f, sh->c1 + 4 * i, 4); n += snprintf(line + n, sizeof line - n, " %g", f); }
+    VLOG("%s", line);
+    for (int slot = 3; slot < VKB_NCBUF; slot++) {
+        if (!(sh->cbuf_mask & (1u << slot))) continue;
+        const uint8_t *m = (const uint8_t *)(uintptr_t)S.ubo[stage][slot - 3].addr; uint64_t size = S.ubo[stage][slot - 3].size;
+        if (!m || IsBadReadPtr(m, size)) { VLOG("[cbuf]   c%d %p+%llu: not readable", slot, (const void *)m, (unsigned long long)size); continue; }
+        n = snprintf(line, sizeof line, "[cbuf]   c%d %p+%llu:", slot, (const void *)m, (unsigned long long)size);
+        for (uint64_t i = 0; i < size / 4 && i < 32; i++) { float f; memcpy(&f, m + 4 * i, 4); n += snprintf(line + n, sizeof line - n, " %g", f); }
+        VLOG("%s", line);
+        if (slot == 3 && size >= 144 * 16) {
+            n = snprintf(line, sizeof line, "[cbuf]   c3 vec4 128..143:");
+            for (int v = 128; v < 144; v++) { float f[4]; memcpy(f, m + 16 * v, 16); n += snprintf(line + n, sizeof line - n, " %d:(%g %g %g %g)", v, f[0], f[1], f[2], f[3]); }
+            VLOG("%s", line);
+        }
+    }
+}
+
 static void write_stage(writes_t *W, VkDescriptorSet set, const vkb_shader *sh, int stage) {
     uint32_t base = vkb_stage_base(stage);
     VkDeviceSize ua = vkc.props.limits.minUniformBufferOffsetAlignment, sa = vkc.props.limits.minStorageBufferOffsetAlignment;
@@ -1928,6 +1955,15 @@ void vkb_dispatch(const uint8_t *a) {
     dummy_init();
     const vkb_shader *cs = S.sh[5];
     g_fb = 0;   // no targets: every sampled image leaves any feedback layout
+    if (vkb_tex_snap_wanted(cs->key, NULL, vkb_frame())) {   // [Pikmin 4] TOTK_SNAP of a dispatch: the textures it samples
+        char what[16];
+        for (int i = 0; i < cs->ntex; i++) {
+            const view_t *v = NULL;
+            vkb_image *im = handle_image(tex_handle(5, &cs->tex[i]), &v);
+            snprintf(what, sizeof what, "ct%d", cs->tex[i].slot);
+            if (im) vkb_tex_snap(vkb_cmd(), im, what);
+        }
+    }
     prepare_images(cs, 5);
     VkCommandBuffer cb = vkb_cmd();
     mirrors_prepare(cs, 5);
@@ -1947,6 +1983,7 @@ void vkb_dispatch(const uint8_t *a) {
     vk.vkCmdBindShadersEXT(cb, 1, &st, &cs->obj);
     int gq = gprof_begin();
     vkb_checkpoint("dispatch", cs->key, NULL);
+    cbuf_log(cs, 5);
     vk.vkCmdDispatch(cb, (uint32_t)d->x, (uint32_t)d->y, (uint32_t)d->z);
     gprof_end(gq, cs, 1, (uint32_t)(d->x * d->y * d->z), 1);
     vk.vkCmdPipelineBarrier2(cb, &dep);

@@ -1089,7 +1089,9 @@ static uint8_t tone(float v) { v = v / (1.0f + v); return v <= 0 ? 0 : v >= 1 ? 
 static uint32_t dump_bpp(const vkb_image *im, int *depth) {
     VkFormat f = im->format;
     *depth = f == VK_FORMAT_D32_SFLOAT || f == VK_FORMAT_D32_SFLOAT_S8_UINT;   // depth: the float values, as R32F
-    if (im->astc || im->depth > 1 || (im->aspect != VK_IMAGE_ASPECT_COLOR_BIT && !*depth)) return 0;
+    if (im->astc || (im->aspect != VK_IMAGE_ASPECT_COLOR_BIT && !*depth)) return 0;   // [Pikmin 4] 3D: every slice
+    if (f == VK_FORMAT_R32G32B32A32_SFLOAT) return 16;   // [Pikmin 4] (eye adaptation's 1x1 exposure)
+    if (f == VK_FORMAT_A2B10G10R10_UNORM_PACK32) return 4;   // [Pikmin 4] (the colour LUT volume)
     return f == VK_FORMAT_R16G16B16A16_SFLOAT ? 8 : (f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_R8G8B8A8_SRGB ||
            f == VK_FORMAT_B8G8R8A8_UNORM || f == VK_FORMAT_B8G8R8A8_SRGB || f == VK_FORMAT_B10G11R11_UFLOAT_PACK32 ||
            f == VK_FORMAT_R32_SFLOAT || *depth) ? 4 : f == VK_FORMAT_R16_SFLOAT ? 2 : 0;
@@ -1101,16 +1103,17 @@ static uint8_t *dump_copy(VkCommandBuffer cb, vkb_image *im, uint32_t layer, uin
     if (!*bpp) return NULL;
     VkBuffer b;
     VkDeviceSize off;
-    uint8_t *px = vkb_ring_alloc((VkDeviceSize)im->width * im->height * *bpp, 16, &b, &off);
+    uint32_t d3 = im->d.target == NVN_TEXTURE_TARGET_3D && im->depth > 1 ? im->depth : 1;   // [Pikmin 4] a volume: all slices
+    uint8_t *px = vkb_ring_alloc((VkDeviceSize)im->width * im->height * d3 * *bpp, 16, &b, &off);
     vkb_image_use(cb, im, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
     VkBufferImageCopy r = {.bufferOffset = off, .imageSubresource = {depth ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, 0, layer, 1},
-                           .imageExtent = {im->width, im->height, 1}};
+                           .imageExtent = {im->width, im->height, d3}};
     vk.vkCmdCopyImageToBuffer(cb, im->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, b, 1, &r);
     return px;
 }
 // <dir>/<prefix><serial>_<format>_<w>x<h>.bmp (float formats Reinhard-mapped) and value statistics in the log.
 static void dump_save(const char *dir, const char *prefix, const vkb_image *im, const uint8_t *px, uint32_t bpp) {
-    uint32_t w = im->width, h = im->height, size = w * h * 4;
+    uint32_t w = im->width, h = im->height * (im->d.target == NVN_TEXTURE_TARGET_3D && im->depth > 1 ? im->depth : 1), size = w * h * 4;   // slices stacked
     uint8_t *out = malloc(size);
     if (!out) return;
     for (uint32_t p = 0; p < w * h; p++) {
@@ -1128,6 +1131,8 @@ static void dump_save(const char *dir, const char *prefix, const vkb_image *im, 
             break;
         }
         case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB: o[0] = s[0]; o[1] = s[1]; o[2] = s[2]; o[3] = 255; break;
+        case VK_FORMAT_A2B10G10R10_UNORM_PACK32: { uint32_t v; memcpy(&v, s, 4); o[2] = (uint8_t)((v & 0x3FF) >> 2); o[1] = (uint8_t)(((v >> 10) & 0x3FF) >> 2); o[0] = (uint8_t)(((v >> 20) & 0x3FF) >> 2); o[3] = 255; break; }
+        case VK_FORMAT_R32G32B32A32_SFLOAT: { float c[4]; memcpy(c, s, 16); o[2] = tone(c[0]); o[1] = tone(c[1]); o[0] = tone(c[2]); o[3] = 255; break; }
         case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_D32_SFLOAT: case VK_FORMAT_D32_SFLOAT_S8_UINT:
             { float v; memcpy(&v, s, 4); o[0] = o[1] = o[2] = tone(v < 0 ? -v : v); o[3] = 255; break; }
         case VK_FORMAT_R16_SFLOAT: { uint16_t v; memcpy(&v, s, 2); float fv = half_to_float(v); o[0] = o[1] = o[2] = tone(fv < 0 ? -fv : fv); o[3] = 255; break; }
@@ -1147,6 +1152,12 @@ static void dump_save(const char *dir, const char *prefix, const vkb_image *im, 
         for (uint32_t p = 0; p < w * h; p++) { float v; memcpy(&v, px + (size_t)p * 4, 4); sum += v; if (v < lo) lo = v; if (v > hi) hi = v; }
         VLOG("[dump] %stexture %llu %s %ux%u: min %g mean %g max %g, centre %g", prefix, (unsigned long long)im->serial,
              im->format == VK_FORMAT_R32_SFLOAT ? "R32F" : "depth", w, h, lo, sum / (w * h), hi, ((const float *)px)[(size_t)(h / 2) * w + w / 2]);
+    }
+    if (im->format == VK_FORMAT_R32G32B32A32_SFLOAT && w * h <= 64) {   // [Pikmin 4] a few texels (exposure, histogram): their values
+        const float *fv = (const float *)px;
+        char line[4096]; int ln = 0;
+        for (uint32_t t = 0; t < w * h && ln < 3900; t++) ln += snprintf(line + ln, sizeof line - ln, " [%g %g %g %g]", fv[4 * t], fv[4 * t + 1], fv[4 * t + 2], fv[4 * t + 3]);
+        VLOG("[dump] %stexture %llu RGBA32F %ux%u:%s", prefix, (unsigned long long)im->serial, w, h, line);
     }
     char path[1024];
     snprintf(path, sizeof path, "%s/%s%llu_%02x_%ux%u.bmp", dir, prefix, (unsigned long long)im->serial, im->d.format, w, h);
