@@ -170,22 +170,26 @@ typedef struct { void *ev[8]; int n; } Signals;
 static void note(Movie *m, Signals *s, int which) { if (m->events && m->events[which] && s->n < 8) s->ev[s->n++] = m->events[which]; }
 static void fire(const Signals *s) { for (int i = 0; i < s->n; i++) g_signal(s->ev[i]); }
 
-static int frame_bytes(const Movie *m) { return m->w * m->h + (m->w / 2) * (m->h / 2) * 2; }
+/* [Pikmin 4] chroma of an odd size rounds up (VP9 / nxnative md_nv12): (w+1)/2 x (h+1)/2 pairs, rows of chroma_stride bytes
+   (the tutorial videos are 1040x585); even sizes are unchanged */
+static int chroma_stride(int w) { return (w + 1) / 2 * 2; }
+static int frame_bytes(const Movie *m) { return m->w * m->h + chroma_stride(m->w) * ((m->h + 1) / 2); }
 
 /* I420 (libvpx) -> packed NV12: Y rows, then rows of interleaved U, V. */
 static void to_nv12(const vpx_image_t *img, uint8_t *dst, int w, int h) {
     for (int y = 0; y < h; y++) memcpy(dst + (size_t)y * w, img->planes[VPX_PLANE_Y] + (size_t)y * img->stride[VPX_PLANE_Y], (size_t)w);
     uint8_t *uv = dst + (size_t)w * h;
-    for (int y = 0; y < h / 2; y++) {
+    int cw = (w + 1) / 2, cs = chroma_stride(w);
+    for (int y = 0; y < (h + 1) / 2; y++) {
         const uint8_t *u = img->planes[VPX_PLANE_U] + (size_t)y * img->stride[VPX_PLANE_U];
         const uint8_t *v = img->planes[VPX_PLANE_V] + (size_t)y * img->stride[VPX_PLANE_V];
-        uint8_t *o = uv + (size_t)y * w; int x = 0;
-        for (; x + 16 <= w / 2; x += 16) {   // [port] SSE2
+        uint8_t *o = uv + (size_t)y * cs; int x = 0;
+        for (; x + 16 <= cw; x += 16) {   // [port] SSE2
             __m128i a = _mm_loadu_si128((const __m128i *)(u + x)), b = _mm_loadu_si128((const __m128i *)(v + x));
             _mm_storeu_si128((__m128i *)(o + 2 * x), _mm_unpacklo_epi8(a, b));
             _mm_storeu_si128((__m128i *)(o + 2 * x + 16), _mm_unpackhi_epi8(a, b));
         }
-        for (; x < w / 2; x++) { o[2 * x] = u[x]; o[2 * x + 1] = v[x]; }
+        for (; x < cw; x++) { o[2 * x] = u[x]; o[2 * x + 1] = v[x]; }
     }
 }
 static int free_out(const Movie *m) { for (int i = 0; i < OUT_BUFS; i++) if (!m->out_held[i]) return i; return -1; }
@@ -319,7 +323,7 @@ static int h_configure(void *obj, void *format) {
     if (m->format != FORMAT_NV12 && !(m->mode == MODE_TEXTURE && m->format == FORMAT_ABGR)) { MLOG("output format %d not implemented on the host (NV12 = 4 only)", m->format); return ST_UNSUPPORTED; }
     const char *mime = NULL; int w = 0, h = 0;
     md_find_string(format, "mime", &mime); md_find_int32(format, "width", &w); md_find_int32(format, "height", &h);
-    if (!mime || strcmp(mime, "video/x-vnd.on2.vp9") || w <= 0 || h <= 0 || w > 8192 || h > 8192 || (w | h) & 1) {
+    if (!mime || strcmp(mime, "video/x-vnd.on2.vp9") || w <= 0 || h <= 0 || w > 8192 || h > 8192) {   // [Pikmin 4] odd sizes too (nxnative)
         MLOG("configure: mime %s %dx%d not supported", mime ? mime : "(none)", w, h); return ST_UNSUPPORTED;
     }
     pthread_mutex_lock(&m->mu);
@@ -525,8 +529,9 @@ void nvn_host_signal_sync(void *s);
 static inline uint8_t clamp8(int v) { return (uint8_t)(v < 0 ? 0 : v > 255 ? 255 : v); }
 static void nv12_to_rgba(const uint8_t *nv12, int sw, int sh, uint8_t *out, int w, int h) {
     const uint8_t *uv = nv12 + (size_t)sw * sh;
+    int cs = chroma_stride(sw);
     for (int y = 0; y < h; y++) {
-        const uint8_t *yr = nv12 + (size_t)y * sw, *cr = uv + (size_t)(y / 2) * sw;
+        const uint8_t *yr = nv12 + (size_t)y * sw, *cr = uv + (size_t)(y / 2) * cs;
         uint8_t *o = out + (size_t)y * w * 4;
         for (int x = 0; x < w; x++) {
             int c = 298 * (yr[x] - 16), d = cr[x & ~1] - 128, e = cr[(x & ~1) + 1] - 128;
