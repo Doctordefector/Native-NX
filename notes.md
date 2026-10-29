@@ -140,3 +140,14 @@ Keyboard controls in game: W/A/S/D move, J=A, K=B, I=X, U=Y, Enter=+, Tab or Esc
   run, so each session fills in more of the game. Pikmin 3 Deluxe isn't Unreal, so check how it stores shaders.
 - Compute shaders need the thread-group size from the NVN shader control (+0x748, three u32 values) and the shared
   memory size from +0x754, as nxnative's `shader_split.py` reads them.
+
+## Publishing (github.com/Doctordefector/Native-NX)
+
+The public repo is assembled in `publish\Native-NX\` (its own git repo, branch `main`). It holds the root files (README,
+notes, launchers, `nxrecomp\` sources without `bin\` or `config.json`) plus every port under `ports\<game>\`, merged
+with its history by `git subtree`. Nothing from `work\`, `refs\`, `.venv\`, `.cache\` or any game build goes in.
+
+- Update a port: `git -C publish/Native-NX subtree pull --prefix=ports/<game> "T:/Dev/Switch PC Recomps/ports/<game>" master`
+- Add a new port: the same with `subtree add`.
+- Root files: copy them over, then commit and push from `publish\Native-NX`.
+- **Never put AI attribution in commits** (no `Co-Authored-By: Claude`, no "Generated with" lines). That's the owner's rule.
