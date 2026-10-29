@@ -14,7 +14,9 @@ except Exception:           # no lz4 module, use the slow pure python one
     _lz4 = None
 
 CODE_BASE = 0x08000000      # same as hw (39-bit AS)
+CODE_BASE32 = 0x00200000    # 32-bit processes (npdm address space 0/2)
 PAGE = 0x1000
+ELF32 = False               # set by load_program from main.npdm: AArch32 game, ELF32 dynamic/REL relocs
 
 
 def lz4_block(src, size):
@@ -82,6 +84,7 @@ class Module:
             self.parse_eh(self.mod0['ehf_start'], self.mod0['ehf_end'])
 
     def parse_dynamic(self, off):
+        if ELF32: return self.parse_dynamic32(off)
         d = {}
         while off + 16 <= len(self.image):
             tag, val = struct.unpack_from('<qQ', self.image, off); off += 16
@@ -121,6 +124,47 @@ class Module:
                 if typ == 1027 and self.in_text(r_add):        # R_AARCH64_RELATIVE
                     self.relptrs.add(r_add)
         # absolute pointers already in .data (rare for NSO, shows up in NRO)
+
+    def parse_dynamic32(self, off):
+        d = {}
+        while off + 8 <= len(self.image):
+            tag, val = struct.unpack_from('<iI', self.image, off); off += 8
+            if tag == 0: break
+            d.setdefault(tag, val)
+        self.dyn = d
+        strtab = d.get(5); symtab = d.get(6); syment = d.get(11, 16)
+        hashoff = d.get(4)
+        nsyms = self.u32(hashoff + 4) if hashoff is not None else (
+            (strtab - symtab) // syment if strtab and symtab and strtab > symtab else 0)
+        self.symlist = []
+        if symtab is not None and strtab is not None:
+            for i in range(nsyms):
+                o = symtab + i * syment
+                if o + 16 > len(self.image): break
+                nm, val, size, info, oth, shn = struct.unpack_from('<IIIBBH', self.image, o)
+                e = self.image.find(b'\0', strtab + nm)
+                name = self.image[strtab + nm:e].decode('latin1') if nm else ''
+                self.symlist.append((name, info, shn, val, size))
+                if shn and name and (info & 15) in (1, 2, 0) and val:
+                    if val & 1: continue                       # Thumb symbol: not translated
+                    self.syms[val] = name
+                    if (info & 15) == 2 and self.in_text(val):
+                        self.funcs.add(val)
+                elif shn == 0 and name:
+                    self.imports.append(name)
+        # REL relocs pointing into code (vtables, callbacks): the addend is the word at r_offset
+        self.thumbptrs = set()
+        for rt, rs in ((17, 18), (0x17, 2)):           # DT_REL/RELSZ, DT_JMPREL/PLTRELSZ
+            base = d.get(rt); size = d.get(rs, 0)
+            if base is None: continue
+            for o in range(base, base + size, 8):
+                if o + 8 > len(self.image): break
+                r_off, r_info = struct.unpack_from('<II', self.image, o)
+                if r_info & 0xFF == 23:                # R_ARM_RELATIVE
+                    v = self.word(r_off)
+                    if v is None: continue
+                    if v & 1 and self.text[0] <= v - 1 < self.text[0] + self.text[1]: self.thumbptrs.add(v - 1)
+                    elif self.in_text(v): self.relptrs.add(v)
 
     # ---------------------------------------------------------------- eh_frame
     def read_enc(self, o, enc, base_for_pcrel=None, datarel=0):
@@ -277,7 +321,11 @@ def find_exefs(folder):
 
 def load_program(entry):
     """-> (modules sorted with bases assigned, npdm bytes, romfs path or bytes)"""
+    global ELF32
     mods = []; npdm = None; romfs = None
+    ex = None if (os.path.isfile(entry) and entry.lower().endswith('.nro')) else find_exefs(entry)
+    if ex and os.path.isfile(os.path.join(ex, 'main.npdm')):
+        ELF32 = not parse_npdm(open(os.path.join(ex, 'main.npdm'), 'rb').read())['is64']
     if os.path.isfile(entry) and entry.lower().endswith('.nro'):
         m = load_nro(entry); mods = [m]; romfs = nro_romfs(m)
     else:
@@ -293,7 +341,7 @@ def load_program(entry):
         root = os.path.dirname(ex) if os.path.basename(ex).lower() == 'exefs' else ex
         for c in ('romfs', 'RomFS'):
             if os.path.isdir(os.path.join(root, c)): romfs = os.path.join(root, c)
-    base = CODE_BASE
+    base = CODE_BASE32 if ELF32 else CODE_BASE
     for m in mods:
         m.base = base
         base += m.size + PAGE      # guard page
@@ -318,6 +366,7 @@ if __name__ == '__main__':
     import sys
     mods, npdm, romfs = load_program(sys.argv[1])
     for m in mods:
+        print('thumb ptrs', len(getattr(m, 'thumbptrs', ())))
         print('%-8s base=%010X size=%08X text=%X ro=%X data=%X bss=%X syms=%d funcs=%d fde=%d relptr=%d imports=%d' % (
             m.name, m.base, m.size, m.text[1], m.ro[1], m.data[1], m.bss, len(m.syms), len(m.funcs), len(m.fde),
             len(m.relptrs), len(m.imports)))
