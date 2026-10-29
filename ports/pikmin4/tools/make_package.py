@@ -1,0 +1,243 @@
+"""Make the builder package for a release: dist/UltraTears-builder-<version>-windows-x86_64.zip.
+
+usage: python tools/make_package.py [--home ../release-test] [--python <Python 3.14>] [--no-zip]
+The version is the tag v<x.y.z> on HEAD (tools/version.py): tag the release commit first.
+Run on the developer's machine after a complete build in the game folder --home (tools/setup.py --output: its build/build.ninja
+and objects tell which parts of clang64 the build reads) and tools/build_xlate.py (dev-local/build/shaders):
+  - the source: the public tree of HEAD (tools/public_tree.py: what git tracks, without the internal notes), so nothing
+    made from the game can slip in;
+  - deps/clang64: the part of MSYS2 CLANG64 the build uses, found by measuring, not guessing: the headers ninja
+    recorded for every compiled file (and those of tools/bc7build), the libraries and objects lld reads when it links
+    UltraTears.exe and bc7build.exe (its --verbose "Reading" lines), the programs (clang, clang++, lld, llvm-windres, ninja) and every DLL
+    they load (llvm-objdump -p, followed recursively), and the licenses of the MSYS2 packages these come from;
+  - deps/python: Python 3.14 (the given install, default the one running this) without its tests, docs and Tk, with
+    the packages the build imports (lz4, capstone, unicorn) from this project's .venv;
+  - deps/shaders/ultrs-shaders.exe, the shader translator (tools/build_xlate.py);
+  - setup.bat, VERSION.txt and THIRD-PARTY-NOTICES.md.
+Refuses a dirty working tree: the package must be the commit it names.
+"""
+import argparse
+import io
+import os
+import pathlib
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import zipfile
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / 'tools'))
+from toolchain import CLANG64, env as tool_env  # noqa: E402
+import public_tree  # noqa: E402
+import version  # noqa: E402
+
+PREFIX = CLANG64.parent if CLANG64 else None   # .../clang64
+PROGRAMS = ['clang.exe', 'clang++.exe', 'ld.lld.exe', 'lld.exe', 'llvm-windres.exe', 'llvm-rc.exe', 'ninja.exe']
+# MSYS2 package (share/licenses/<name>) of each part of clang64 the package carries
+LICENSES = ['clang', 'clang-libs', 'compiler-rt', 'crt', 'headers', 'libc++', 'libunwind', 'libwinpthread', 'winpthreads',
+            'lld', 'llvm', 'llvm-libs', 'llvm-tools', 'ninja', 'SDL3', 'opus', 'libvpx', 'zstd', 'libiconv', 'zlib', 'xz',
+            'libffi', 'libxml2', 'vulkan-headers']
+PY_PACKAGES = ['lz4', 'capstone', 'unicorn']
+PY_SKIP = {'test', 'idlelib', 'tkinter', 'turtledemo', 'ensurepip', 'lib2to3', '__pycache__'}
+
+SETUP_BAT = r'''@echo off
+rem UltraTears: build the game from your own dump. Put your extracted exefs and romfs folders into game\ here and
+rem run this file (or drag a dump folder kept elsewhere onto it). Run it again to resume, or after an update.
+cd /d "%~dp0"
+if "%~1"=="" (
+  "deps\python\python.exe" tools\setup.py
+) else (
+  "deps\python\python.exe" tools\setup.py --dump "%~1"
+)
+echo.
+pause
+'''
+
+
+GAME_TXT = '''Put your own extracted copy of The Legend of Zelda: Tears of the Kingdom, update 1.4.3 applied, here:
+
+  game\\exefs\\   main, subsdk0, sdk, main.npdm, ...
+  game\\romfs\\   Actor\\, Pack\\, Shader\\, ... (about 304,000 files, 16 GB)
+
+then run setup.bat. After the build the game reads data\\romfs, so game\\romfs may be deleted. README.md has the details.
+
+Положите сюда свою извлечённую копию The Legend of Zelda: Tears of the Kingdom с обновлением 1.4.3:
+
+  game\\exefs\\   main, subsdk0, sdk, main.npdm, ...
+  game\\romfs\\   Actor\\, Pack\\, Shader\\, ... (около 304 000 файлов, 16 ГБ)
+
+и запустите setup.bat. После сборки игра читает data\\romfs, папку game\\romfs можно удалить. Подробнее — README.ru.md.
+'''
+
+
+NOTICES = '''# Third-party notices (builder package)
+
+UltraTears itself is GPL-3.0-or-later (LICENSE). Its source's third-party code is listed in third_party/README.md.
+This package also carries tools to build it; each keeps its license, copied into licenses/:
+
+| Part | What | License | Text |
+|---|---|---|---|
+| deps/clang64 | Parts of MSYS2 CLANG64: LLVM clang, lld, libc++, libunwind, compiler-rt (Apache-2.0 WITH LLVM-exception); mingw-w64 headers, CRT and winpthreads (ZPL / MIT / public domain); ninja (Apache-2.0); SDL3 (zlib); opus, libvpx, zstd (BSD); libiconv (LGPL-2.1+, linked statically: the objects to relink are made on your PC by the build itself); zlib, xz, libffi, libxml2 (their DLLs, loaded by clang); Vulkan headers (Apache-2.0 / MIT) | as listed | licenses/msys2/<package>/ |
+| deps/python | Python 3.14 (PSF License) with lz4 (BSD), capstone (BSD), unicorn (GPL-2.0) | as listed | licenses/Python.txt; each package's *.dist-info in deps/python/Lib/site-packages |
+| deps/shaders | ultrs-shaders: totk_xlate (MacNativeGames, MIT) around the Ryujinx 1.3.2 shader translator (MIT), published self-contained with the .NET runtime (MIT) | MIT | licenses/Ryujinx.txt, third_party/shader_translator/LICENSE |
+
+Sources: MSYS2 packages https://packages.msys2.org (CLANG64), Python https://www.python.org, Ryujinx
+https://github.com/Ryubing, MacNativeGames (third_party/README.md).
+'''
+
+
+def git(*args):
+    return subprocess.run(['git', '-C', str(ROOT)] + list(args), check=True, capture_output=True, text=True).stdout
+
+
+def clang64_files_used(home):
+    """Headers, libraries and objects of clang64 that the build reads, measured."""
+    used = set()
+    deps = subprocess.run([str(CLANG64 / 'ninja.exe'), '-C', str(home), '-f', 'build/build.ninja', '-t', 'deps'],
+                          capture_output=True, text=True, env=tool_env()).stdout
+    # the game folder's build may have used its own deps/clang64 (a previous package): the same files of PREFIX
+    prefixes = [str(PREFIX).replace('\\', '/').lower(), str(home / 'deps/clang64').replace('\\', '/').lower()]
+    for line in deps.splitlines():
+        p = line.strip().replace('\\', '/')
+        for pre in prefixes:
+            if p.lower().startswith(pre + '/'):
+                used.add(PREFIX / p[len(pre) + 1:])
+    tmp = ROOT / 'dev-local/build/package-probe'
+    tmp.mkdir(parents=True, exist_ok=True)
+    for src, cxx in (('tools/bc7build/bc7build.c', False), ('src/gfx/tex/astc.c', False), ('src/gfx/tex/bc7.cpp', True),
+                     ('src/gfx/tex/bc7enc/bc7enc.cpp', True), ('src/gfx/tex/bc7enc/rgbcx.cpp', True)):
+        cmd = [str(CLANG64 / ('clang++.exe' if cxx else 'clang.exe')), '-M', str(ROOT / src)]
+        if cxx:
+            cmd.append('-std=c++17')
+        out = subprocess.run(cmd, capture_output=True, text=True, env=tool_env()).stdout
+        for p in re.split(r'\s+', out.replace('\\\n', ' ')):
+            p = p.replace('\\', '/')
+            if p.lower().startswith(str(PREFIX).replace('\\', '/').lower()):
+                used.add(pathlib.Path(p))
+    # libraries: what lld reads in the two links (--verbose)
+    ninja = (home / 'build/build.ninja').read_text()
+    rsp = re.search(r'^build UltraTears\.exe: link (.*)$', ninja, re.M).group(1).split()   # ninja deletes the .rsp
+    link = re.search(r'command = clang (.*) -o \$out @\$out.rsp (.*)', ninja)
+    flags = link.group(1).split() + link.group(2).split()
+    for objs, libs in ((rsp, flags), ([], ['-static', '-pthread', '-lzstd', '-lc++'])):
+        probe = tmp / 'probe.c'
+        probe.write_text('int main(void) { return 0; }\n')
+        cmd = [str(CLANG64 / 'clang.exe'), '-fuse-ld=lld', '-Wl,--verbose', '-o', str(tmp / 'probe.exe')]
+        rsp_file = tmp / 'probe.rsp'   # 1500 objects: past Windows' command-line limit
+        rsp_file.write_text('\n'.join((home / o).as_posix() for o in objs) if objs else probe.as_posix())
+        cmd += ['@' + str(rsp_file)] + [f for f in libs if f not in ('-g',)]
+        cmd = [c for c in cmd if not c.startswith('-Wl,--pdb')]
+        r = subprocess.run(cmd, capture_output=True, text=True, env=tool_env(), cwd=home)
+        if r.returncode:
+            sys.exit('the probe link failed:\n' + (r.stdout + r.stderr)[-2000:])
+        for line in (r.stdout + r.stderr).splitlines():
+            m = re.match(r'ld\.lld: Reading (.+)$', line.strip())
+            if not m:
+                continue
+            p = m.group(1).replace('\\', '/')
+            if p.lower().startswith(str(PREFIX).replace('\\', '/').lower()) and os.path.isfile(p):
+                used.add(pathlib.Path(p))
+    shutil.rmtree(tmp, ignore_errors=True)
+    return used
+
+
+def dll_closure(programs):
+    seen, todo = set(), [CLANG64 / p for p in programs]
+    while todo:
+        f = todo.pop()
+        if f in seen or not f.is_file():
+            continue
+        seen.add(f)
+        out = subprocess.run([str(CLANG64 / 'llvm-objdump.exe'), '-p', str(f)], capture_output=True, text=True).stdout
+        for dll in re.findall(r'DLL Name: (\S+)', out):
+            cand = CLANG64 / dll
+            if cand.is_file():
+                todo.append(cand)
+    return seen
+
+
+def copy_python(src, dst):
+    for item in src.iterdir():
+        if item.name in ('python.exe', 'pythonw.exe', 'python3.dll', 'python314.dll', 'vcruntime140.dll',
+                         'vcruntime140_1.dll', 'LICENSE.txt'):
+            shutil.copy2(item, dst / item.name)
+    shutil.copytree(src / 'DLLs', dst / 'DLLs', ignore=shutil.ignore_patterns('_tkinter*', 'tcl*', 'tk*'))
+    shutil.copytree(src / 'Lib', dst / 'Lib', ignore=lambda d, names: [n for n in names if n in PY_SKIP or n == 'site-packages'])
+    site = dst / 'Lib/site-packages'
+    site.mkdir(parents=True, exist_ok=True)
+    venv_site = ROOT / '.venv/Lib/site-packages'
+    for name in os.listdir(venv_site):
+        base = name.split('-')[0].split('.')[0]
+        if base.lower() in {p.lower() for p in PY_PACKAGES} or (name.endswith('.dist-info') and
+                                                               name.split('-')[0].lower() in ('lz4', 'capstone', 'unicorn')):
+            s = venv_site / name
+            (shutil.copytree(s, site / name, ignore=shutil.ignore_patterns('__pycache__')) if s.is_dir()
+             else shutil.copy2(s, site / name))
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--python', type=pathlib.Path, default=pathlib.Path(sys.base_prefix))
+    ap.add_argument('--no-zip', action='store_true')
+    ap.add_argument('--home', type=pathlib.Path, default=ROOT.parent / 'release-test')
+    a = ap.parse_args()
+    if git('status', '--porcelain', '--untracked-files=no').strip():
+        sys.exit('the working tree has uncommitted changes: commit first, the package must be the commit it names')
+    a.version = version.release()
+    if not a.version:
+        sys.exit('HEAD has no release tag: git tag v<x.y.z> (the package is named after it)')
+    home, xlate = a.home.resolve(), ROOT / 'dev-local/build/shaders/ultrs-shaders.exe'
+    for need in (home / 'UltraTears.exe', home / 'build/build.ninja', xlate):
+        if not need.is_file():
+            sys.exit(f'{need} is missing: build first (tools/setup.py --output, tools/build_xlate.py)')
+    name = f'UltraTears-builder-{a.version}-windows-x86_64'
+    out = ROOT / 'dev-local/dist' / name
+    if out.exists():
+        shutil.rmtree(out)
+    out.mkdir(parents=True)
+    # the source: the public tree of HEAD
+    tar = subprocess.run(['git', '-C', str(ROOT), 'archive', '--format=tar', public_tree.tree()], check=True,
+                         capture_output=True).stdout
+    with tarfile.open(fileobj=io.BytesIO(tar)) as t:
+        t.extractall(out, filter='data')
+    commit = git('rev-parse', '--short', 'HEAD').strip()
+    # deps/clang64
+    used = clang64_files_used(home) | dll_closure(PROGRAMS)
+    for f in sorted(used):
+        rel = f.relative_to(PREFIX) if f.is_absolute() else f
+        dst = out / 'deps/clang64' / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(f, dst)
+    lic = out / 'licenses'
+    for pkg in LICENSES:
+        d = PREFIX / 'share/licenses' / pkg
+        if d.is_dir():
+            shutil.copytree(d, lic / 'msys2' / pkg)
+    # deps/python, deps/shaders
+    py = out / 'deps/python'
+    py.mkdir(parents=True)
+    copy_python(a.python, py)
+    (out / 'deps/shaders').mkdir(parents=True)
+    shutil.copy2(xlate, out / 'deps/shaders/ultrs-shaders.exe')
+    shutil.copy2(ROOT / 'third_party/maxwell_shader/LICENSE.txt', lic / 'Ryujinx.txt')
+    shutil.copy2(a.python / 'LICENSE.txt', lic / 'Python.txt')
+    (out / 'setup.bat').write_text(SETUP_BAT.replace('\n', '\r\n'))
+    (out / 'THIRD-PARTY-NOTICES.md').write_text(NOTICES)
+    (out / 'game').mkdir()
+    (out / 'game/PUT-YOUR-GAME-HERE.txt').write_text(GAME_TXT.replace('\n', '\r\n'), encoding='utf-8')
+    (out / 'VERSION.txt').write_text(version.version_txt(a.version, commit))
+    size = sum(f.stat().st_size for f in out.rglob('*') if f.is_file())
+    print(f'{out}: {size / 2**20:.0f} MiB, {len(used)} files of clang64')
+    if not a.no_zip:
+        z = out.parent / (name + '.zip')
+        with zipfile.ZipFile(z, 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+            for f in sorted(out.rglob('*')):
+                if f.is_file():
+                    zf.write(f, pathlib.Path(name) / f.relative_to(out))
+        print(f'{z}: {z.stat().st_size / 2**20:.0f} MiB')
+
+
+if __name__ == '__main__':
+    main()

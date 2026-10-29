@@ -1,0 +1,23 @@
+name: AI Moderator
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+jobs:
+  moderate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+      models: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: github/ai-moderator@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          enable-ai-detection: false
+          enable-spam-detection: true
+          enable-link-spam-detection: true

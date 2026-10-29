@@ -1,0 +1,53 @@
+# The source folder holds no game data. Everything made from the game lives in the game folder (a builder package
+# unpacked elsewhere, tools/deploy.py); the patterns below are a safety net for what must never be committed.
+
+# The user's own files from their console: never commit
+Game/
+Keys/
+Firmware/
+*.nsp
+*.nsz
+*.xci
+*.xcz
+*.nca
+*.nso
+*.nro
+*.keys
+*.tik
+*.bfttf
+
+# Development only, not in the repository or a release: local tools, reference checkouts, .NET caches, builds of
+# development tools, release packages
+/dev-local/
+/dist/
+
+# A game folder's own (tools/setup.py), should one ever be made inside the source folder
+/game/
+/data/
+/build/
+/userdata/
+/diag/
+/deps/
+/ultratears.cfg
+/UltraTears.exe
+/setup-files.txt
+
+# Former development layout (kept ignored until removed)
+/work/
+/refs/
+/user-data/
+.ninja_*
+
+# Local environments and build state
+.venv/
+__pycache__/
+third_party/maxwell_shader/src/*/bin/
+third_party/maxwell_shader/src/*/obj/
+third_party/shader_translator/bin/
+third_party/shader_translator/obj/
+third_party/totk_xlate/
+
+# nxrecomp port outputs
+build.log
+run/
+UltraTears.exe.rsp
