@@ -1,0 +1,23 @@
+# Nothing from a game or a console is ever committed: decrypted code, lifted C, RomFS, keys, saves, builds
+/work/
+/refs/
+/.venv/
+/.cache/
+/publish/
+*.zip
+*.7z
+*.7z.*
+*.nsp
+*.nsz
+*.xci
+*.xcz
+*.nca
+*.nso
+*.keys
+*.tik
+# local settings and build output of the Hub's tools
+nxrecomp/config.json
+nxrecomp/bin/
+nxrecomp/tools/nx_extract/bin/
+nxrecomp/tools/nx_extract/obj/
+__pycache__/
