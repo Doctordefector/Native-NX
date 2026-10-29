@@ -37,6 +37,7 @@
 #include <vpx/vpx_decoder.h>
 
 enum { IN_BUFS = 4, IN_CAP = 2 << 20, OUT_BUFS = 8, MAX_MOVIES = 16 };
+#define STALE_NS 250000000ull   /* nxnative MD_STALE_NS: how long an input the game held across a flush is withheld */
 enum { TYPE_VP9 = 3, MODE_BUFFER = 1, MODE_TEXTURE = 2, FORMAT_ABGR = 3, FORMAT_NV12 = 4, FLAG_EOS = 4 };   /* [Pikmin 4] texture mode */
 enum { ST_OK = 0, ST_ERROR = 0x1000, ST_NULL = 0x100b, ST_NOT_READY = 0x100c, ST_NO_OUTPUT = 0x100e, ST_NO_INPUT = 0x1011,
        ST_UNSUPPORTED = 0x2001, ST_NOT_CONFIGURED = 0x2002 };
@@ -59,11 +60,12 @@ typedef struct { int index; unsigned flags; int64_t time; } Ready;
 typedef struct { int index, offset, size; int64_t time; unsigned flags; } Pending;
 typedef struct {
     void *guest;                         /* the movie::Decoder object */
-    int format, configured, started, w, h, eos_in, format_sent, last_error;
+    int format, configured, started, w, h, eos_in, format_sent, last_error, late_inputs, tex_outs;
     int mode; uint8_t *rgba;             /* [Pikmin 4] MODE_TEXTURE: frames go to the client's NVN texture as RGBA */
     void **events;                       /* DecoderEvents: EventType* per EV_* */
     vpx_codec_ctx_t vpx; int vpx_live;
     uint8_t *in[IN_BUFS]; int in_free[IN_BUFS], nin_free;
+    int in_own[IN_BUFS]; uint64_t in_stale[IN_BUFS], in_wake;   /* acquired by the game and not sent; held across a flush since (ns) */
     Pending pending[IN_BUFS]; int npending;
     uint8_t *out[OUT_BUFS]; int out_bytes[OUT_BUFS], out_held[OUT_BUFS];
     Ready ready[OUT_BUFS]; int nready;
@@ -228,7 +230,10 @@ void movie_host_tick(void) {   /* lock order g_lock -> Movie.mu, as in destroy; 
     pthread_mutex_lock(&g_lock);
     for (int i = 0; i < MAX_MOVIES; i++) {
         Movie *m = g_movies[i]; if (!m) continue;
-        pthread_mutex_lock(&m->mu); if (m->started) release_due(m, &s, now_ns()); pthread_mutex_unlock(&m->mu);
+        pthread_mutex_lock(&m->mu);
+        if (m->started) release_due(m, &s, now_ns());
+        if (m->in_wake && now_ns() >= m->in_wake) { m->in_wake = 0; if (m->started) note(m, &s, EV_INPUT); }
+        pthread_mutex_unlock(&m->mu);
     }
     pthread_mutex_unlock(&g_lock);
     fire(&s);
@@ -294,8 +299,13 @@ static void release_codec(Movie *m) {
     for (int i = 0; i < OUT_BUFS; i++) { free(m->out[i]); m->out[i] = NULL; }
     m->configured = m->started = 0; m->nin_free = m->npending = m->nready = m->ndecoded = 0; m->t0 = 0;
 }
+/* [Pikmin 4] as nxnative md_reset: every input goes back to the free list, but one the game holds may still be sent after
+   the flush (the tutorial clips loop by Flush + Start; a buffer handed out twice stalled the loop after 19 frames, a black
+   clip): it is withheld for STALE_NS unless the game sends it first (h_send_input claims it back) */
 static void reset_queues(Movie *m) {
-    m->nin_free = 0; for (int i = 0; i < IN_BUFS; i++) m->in_free[m->nin_free++] = i;
+    uint64_t now = now_ns();
+    m->nin_free = 0; for (int i = 0; i < IN_BUFS; i++) { m->in_free[m->nin_free++] = i; m->in_stale[i] = m->in_own[i] ? now : 0; m->in_own[i] = 0; }
+    m->in_wake = 0;
     memset(m->out_held, 0, sizeof m->out_held); m->npending = m->nready = m->ndecoded = 0; m->eos_in = 0; m->t0 = 0;
 }
 static int host_off(void) { static int off = -1; if (off < 0) { const char *e = getenv("TOTK_MOVIE_HOST"); off = e && !strcmp(e, "0"); } return off; }
@@ -379,6 +389,7 @@ static int h_start(void *obj) {
     pthread_mutex_lock(&m->mu);
     if (!m->configured) { pthread_mutex_unlock(&m->mu); return ST_NOT_CONFIGURED; }
     m->started = 1; note(m, &s, EV_INPUT);
+    MLOG("start (%llu frames so far)", (unsigned long long)m->frames);
     pthread_mutex_unlock(&m->mu); fire(&s);
     return ST_OK;
 }
@@ -389,12 +400,13 @@ static int h_stop(void *obj) {
 }
 static int h_reset(void *obj) {
     Movie *m = find(obj); if (!m) return (int)orig(MOVIE_RESET, 1, (uint64_t[]){U(obj)});
-    pthread_mutex_lock(&m->mu); release_codec(m); m->last_error = 0; pthread_mutex_unlock(&m->mu);
+    pthread_mutex_lock(&m->mu); MLOG("reset after %llu frames", (unsigned long long)m->frames); release_codec(m); m->last_error = 0; pthread_mutex_unlock(&m->mu);
     return ST_OK;
 }
 static int h_flush(void *obj) {
     Movie *m = find(obj); if (!m) return (int)orig(MOVIE_FLUSH, 1, (uint64_t[]){U(obj)});
     pthread_mutex_lock(&m->mu);
+    MLOG("flush after %llu frames (end of stream %s)", (unsigned long long)m->frames, m->eos_in ? "reached" : "not reached");
     if (m->configured) {   /* drop queued work; the next input starts a new decode (after a seek: a key frame) */
         vpx_codec_destroy(&m->vpx); m->vpx_live = 0;
         vpx_codec_dec_cfg_t cfg = {.threads = 4, .w = (unsigned)m->w, .h = (unsigned)m->h};
@@ -409,9 +421,15 @@ static int h_acquire_input(void *obj, int *index, int *remaining) {
     if (!index || !remaining) return ST_NULL;
     pthread_mutex_lock(&m->mu);
     *index = -1; *remaining = 0; int st = ST_NO_INPUT;
-    if (m->started && m->nin_free > 0) {
-        *index = m->in_free[0]; memmove(m->in_free, m->in_free + 1, (size_t)--m->nin_free * sizeof m->in_free[0]);
-        *remaining = m->nin_free; st = ST_OK;
+    /* no input after an end-of-stream packet until Flush / Stop (nxnative h_movie_AcqIn, as MediaCodec) */
+    uint64_t now = now_ns(); int k = -1;
+    for (int j = 0; j < m->nin_free && k < 0; j++) { int x = m->in_free[j]; if (!m->in_stale[x] || now - m->in_stale[x] >= STALE_NS) k = j; }
+    if (m->started && !m->eos_in && k >= 0) {
+        *index = m->in_free[k]; memmove(m->in_free + k, m->in_free + k + 1, (size_t)(--m->nin_free - k) * sizeof m->in_free[0]);
+        *remaining = m->nin_free; st = ST_OK; m->in_own[*index] = 1; m->in_stale[*index] = 0;
+    } else if (m->started && !m->eos_in && m->nin_free) {   /* only withheld inputs are free: announce input when the first comes back */
+        uint64_t w = UINT64_MAX; for (int j = 0; j < m->nin_free; j++) { uint64_t t = m->in_stale[m->in_free[j]] + STALE_NS; if (t < w) w = t; }
+        m->in_wake = w;
     }
     pthread_mutex_unlock(&m->mu); return st;
 }
@@ -429,8 +447,17 @@ static int h_send_input(void *obj, int index, int offset, int size, int64_t time
     Signals s = {0};
     pthread_mutex_lock(&m->mu);
     if (!m->started) { pthread_mutex_unlock(&m->mu); return ST_ERROR; }
+    for (int k = 0; k < m->nin_free; k++) if (m->in_free[k] == index) {   /* acquired before a flush, sent after it: claimed back */
+        memmove(m->in_free + k, m->in_free + k + 1, (size_t)(--m->nin_free - k) * sizeof m->in_free[0]);
+        static int once; if (!once++) MLOG("input index %d sent after a flush returned it: claimed from the free list", index);
+        break;
+    }
+    m->in_own[index] = 0; m->in_stale[index] = 0;
+    for (int k = 0; k < m->npending; k++) if (m->pending[k].index == index) {
+        pthread_mutex_unlock(&m->mu); MLOG("input index %d sent twice: the second packet is dropped", index); return ST_ERROR;
+    }
     Pending p = {index, offset, size, time, flags};
-    if (m->eos_in) { m->in_free[m->nin_free++] = index; note(m, &s, EV_INPUT); }   /* after end of stream: hand the buffer back */
+    if (m->eos_in) { m->in_free[m->nin_free++] = index; note(m, &s, EV_INPUT); if (m->late_inputs++ < 4) MLOG("input of %d bytes at %lld us after end of stream: returned undecoded", size, (long long)time); }   /* after end of stream: hand the buffer back */
     else if (m->npending || !decode_one(m, &s, &p)) m->pending[m->npending++] = p;
     pthread_mutex_unlock(&m->mu); fire(&s);
     return ST_OK;
@@ -582,6 +609,7 @@ static int out_texture(Movie *m, int index, void *buf) {
     if (have) nvn_host_write_texture(tex, m->rgba, w, h);
     if (sync) nvn_host_signal_sync(sync);
     fire(&s);
+    if (m->tex_outs++ % 60 == 0) MLOG("texture mode: %d outputs written so far (%dx%d to texture %p, centre green %d)", m->tex_outs, w, h, tex, have ? m->rgba[((size_t)w * (h / 2) + w / 2) * 4 + 1] : -1);
     static int said; if (said++ < 2) MLOG("texture mode: output %d -> texture %p (%dx%d of %dx%d, format 0x%x)%s", index, tex, w, h, tw, th, fmt, have ? "" : " (no picture)");
     return ST_OK;
 }
