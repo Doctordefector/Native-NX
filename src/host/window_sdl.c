@@ -11,6 +11,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "host.h"
 #include "../vk/present.h"
@@ -82,6 +83,57 @@ void runtime_rumble_set(unsigned side, float amp_low, float freq_low, float amp_
     SDL_UnlockMutex(pad_lock);
 }
 
+/* [Pikmin 4] development: TOTK_VPAD_SCRIPT=<frame>:<control>[*<frames held>],... drives an SDL virtual gamepad, so
+   scripted input takes the path of a real controller (SDL events, pad_update, the stick conversion). Controls: A B X Y
+   L R ZL ZR PLUS MINUS (Nintendo positions, as pad_update maps them) and LUP LDOWN LLEFT LRIGHT (left stick, full tilt). */
+static SDL_Joystick *vpad;
+static SDL_JoystickID vpad_id;   // set: only this pad is opened (a Steam or other controller would take its place)
+static void vpad_attach(void) {
+    if (!getenv("TOTK_VPAD_SCRIPT")) return;
+    SDL_VirtualJoystickDesc desc;
+    SDL_INIT_INTERFACE(&desc);
+    desc.type = SDL_JOYSTICK_TYPE_GAMEPAD;
+    desc.naxes = SDL_GAMEPAD_AXIS_COUNT;
+    desc.nbuttons = SDL_GAMEPAD_BUTTON_COUNT;
+    desc.name = "UltraTears virtual pad (TOTK_VPAD_SCRIPT)";
+    SDL_JoystickID id = SDL_AttachVirtualJoystick(&desc);
+    vpad = id ? SDL_OpenJoystick(id) : NULL;
+    if (vpad) vpad_id = id;
+    fprintf(stderr, "[totk] virtual gamepad %s\n", vpad ? "attached" : SDL_GetError());
+}
+static void vpad_set(const char *k, size_t n, int down) {
+    static const struct { const char *name; int button, axis, value; } c[] = {
+        {"A", SDL_GAMEPAD_BUTTON_EAST, -1, 0}, {"B", SDL_GAMEPAD_BUTTON_SOUTH, -1, 0}, {"X", SDL_GAMEPAD_BUTTON_NORTH, -1, 0},
+        {"Y", SDL_GAMEPAD_BUTTON_WEST, -1, 0}, {"L", SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, -1, 0}, {"R", SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, -1, 0},
+        {"PLUS", SDL_GAMEPAD_BUTTON_START, -1, 0}, {"MINUS", SDL_GAMEPAD_BUTTON_BACK, -1, 0},
+        {"ZL", -1, SDL_GAMEPAD_AXIS_LEFT_TRIGGER, 32767}, {"ZR", -1, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, 32767},
+        {"LUP", -1, SDL_GAMEPAD_AXIS_LEFTY, -32767}, {"LDOWN", -1, SDL_GAMEPAD_AXIS_LEFTY, 32767},
+        {"LLEFT", -1, SDL_GAMEPAD_AXIS_LEFTX, -32767}, {"LRIGHT", -1, SDL_GAMEPAD_AXIS_LEFTX, 32767}};
+    for (unsigned i = 0; i < sizeof c / sizeof *c; i++) {
+        if (strlen(c[i].name) != n || strncmp(c[i].name, k, n)) continue;
+        if (c[i].button >= 0) SDL_SetJoystickVirtualButton(vpad, c[i].button, down);
+        else SDL_SetJoystickVirtualAxis(vpad, c[i].axis, (Sint16)(down ? c[i].value : 0));
+        if (down) fprintf(stderr, "[totk] virtual gamepad: %.*s\n", (int)n, k);
+        return;
+    }
+}
+void runtime_vpad_tick(uint64_t frame) {   // each game frame (runtime_input_script_tick)
+    static const char *script; static int init;
+    if (!init) { init = 1; script = getenv("TOTK_VPAD_SCRIPT"); }
+    if (!vpad) return;
+    for (const char *p = script; p && *p;) {
+        char *end;
+        uint64_t at = strtoull(p, &end, 10);
+        const char *k = *end == ':' ? end + 1 : end;
+        size_t n = strcspn(k, "*,");
+        uint64_t hold = k[n] == '*' ? strtoull(k + n + 1, NULL, 10) : 6;
+        if (frame == at) vpad_set(k, n, 1);
+        if (frame == at + hold) vpad_set(k, n, 0);
+        p = strchr(k, ',');
+        if (p) p++;
+    }
+}
+
 int window_init(void) {
     SDL_SetMainReady();
     SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, "480");   // 10 ms device buffer at 48 kHz
@@ -92,6 +144,7 @@ int window_init(void) {
         return 0;
     }
     pad_lock = SDL_CreateMutex();
+    vpad_attach();
     window = SDL_CreateWindow("UltraTears", 1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
     if (!window) { fprintf(stderr, "[totk] window: %s\n", SDL_GetError()); return 0; }
     if (!vkp_init(window))
@@ -132,6 +185,7 @@ static void pad_sensor(const SDL_GamepadSensorEvent *e) {
 }
 
 static void open_pad(SDL_JoystickID id) {
+    if (vpad_id && id != vpad_id) return;   // TOTK_VPAD_SCRIPT: the scripted pad only
     SDL_LockMutex(pad_lock);
     if (!pad) {
         pad = SDL_OpenGamepad(id);

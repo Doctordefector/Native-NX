@@ -67,7 +67,9 @@ static int script_code(const char *k, size_t n) {
         if (strlen(named[i].name) == n && !strncmp(named[i].name, k, n)) return named[i].code;
     return -1;
 }
+void runtime_vpad_tick(uint64_t frame);   // window_sdl.c: TOTK_VPAD_SCRIPT
 void runtime_input_script_tick(uint64_t frame) {
+    runtime_vpad_tick(frame);
     static const char *script;
     static int init;
     if (!init) { init = 1; script = getenv("TOTK_INPUT_SCRIPT"); }
