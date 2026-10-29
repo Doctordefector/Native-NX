@@ -41,8 +41,7 @@ def publish(version):
     if parent and git('rev-parse', parent + '^{tree}') == t:
         return parent   # nothing changed since the last release
     msg = (f'UltraTears {version}\n\nAn unofficial native PC port of The Legend of Zelda: Tears of the Kingdom (Switch 1.4.3)'
-           ' by static recompilation, built on the player\'s PC from their own dump. See README.md.\n\n'
-           'Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>')
+           ' by static recompilation, built on the player\'s PC from their own dump. See README.md.')
     commit = git('commit-tree', t, *(['-p', parent] if parent else []), '-m', msg)
     git('branch', '-f', 'public', commit)
     return commit
