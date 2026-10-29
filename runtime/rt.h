@@ -165,6 +165,7 @@ void   kernel_run_main(u64 entry, u64 stack_size, int prio, int core);
 void   swr_svc(CPU* c, u32 imm);
 extern PMutex g_klock;
 extern u64 g_title_id;
+extern volatile u32 g_vi_swap;   /* QueueBuffer swap interval (svc_vi.c): vsyncs per game frame */
 extern int g_exiting;
 void   process_exit(int code);
 

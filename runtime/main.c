@@ -203,7 +203,7 @@ static const IniOpt INI_GRAPHICS[]={
   {"shadows","1","0 = disable shadow maps (more FPS)"},
   {NULL,NULL,NULL}};
 static const IniOpt INI_PERF[]={
-  {"fps_limit","1","1 = 60 FPS (the speed of a Switch), 0 = unlimited (the game runs faster). Values under 60 are treated as 60: the game advances one step per image, so 30 meant half speed. F4 changes it in game"},
+  {"fps_limit","1","1 = the speed of a Switch (60 FPS, or 30 for games that ask for it), 0 = unlimited (the game runs faster). Values under 60 are treated as 60: the game advances one step per image, so 30 meant half speed. F4 changes it in game"},
   {"forced_vsync","0","1 = always wait for vsync (can lower FPS a lot on slow PCs)"},
   {"memory_gb","0","Memory the game sees: 0 = automatic (3.2 GB like the console, more for games that need it,\n;   e.g. Tears of the Kingdom), 4 = console (3.2 GB), 6 or 8 = extended (like yuzu's extended memory layout)"},
   {"low_priority_shader_compiler","1","1 = compile shaders at low priority (less stutter on weak CPUs)"},
@@ -297,15 +297,16 @@ void vi_show_buffer(u32 nvmap_id, u32 offset, u32 w, u32 h, u32 pitch, u32 layou
   }
   { static int once; if(!once){ once=1; if(getenv("SWR_VT")) vt_set(1); } }   /* test smooth clock w/o recording */
   g_frames++; vt_frame();
-  /* fps_limit: 1 = 60, otherwise N fps */
+  /* fps_limit: 1 = the Switch's pace (60 Hz vsync times the game's swap interval: 2 = 30 fps), otherwise N fps */
+  u64 swap= g_opt_fps==1 && g_vi_swap>=1 && g_vi_swap<=4? g_vi_swap : 1;
   /* in smooth recording the limiter has to count guest time, not real time.
      games that tick once per frame would otherwise run sped up in the video */
-  if(g_vt_on){ u64 per= g_opt_fps>=60 && g_opt_fps<=240? 1000000000ull/(u64)g_opt_fps : 16666667ull;
+  if(g_vt_on){ u64 per= g_opt_fps>=60 && g_opt_fps<=240? 1000000000ull/(u64)g_opt_fps : 16666667ull; per*=swap;
     static u64 last_g; u64 g=guest_ns(), next=last_g+per, t0=plat_ns();
     if(last_g && g<next && next-g<per*2){ while(g<next && plat_ns()-t0<1000000000ull){ plat_sleep_ns(500000); g=guest_ns(); } }
     g=guest_ns(); last_g= (last_g && g-last_g<2*per)? next : g; g_last_present=plat_ns(); return; }
   /* while recording keep at least the 60 cap, uncapped + per-frame logic = sped up video */
-  if(g_opt_fps || g_rec_active){ u64 per= g_opt_fps>=60 && g_opt_fps<=240? 1000000000ull/(u64)g_opt_fps : 16666667ull;
+  if(g_opt_fps || g_rec_active){ u64 per= g_opt_fps>=60 && g_opt_fps<=240? 1000000000ull/(u64)g_opt_fps : 16666667ull; per*=swap;
     if(g_opt_fps>=10 && g_opt_fps<60){ static int said; if(!said){ said=1; WARN("fps_limit=%d would run the game at %d%% speed (one game step per image): using 60\n",g_opt_fps,g_opt_fps*100/60); } }
     u64 now=plat_ns(); u64 next=g_last_present+per;
     if(g_last_present && now<next) plat_sleep_ns((i64)(next-now));
