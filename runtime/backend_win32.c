@@ -6,6 +6,9 @@
 #include "rt.h"
 #include <windows.h>
 #include <mmsystem.h>  /* timeBeginPeriod (windows.h leaves it out with WIN32_LEAN_AND_MEAN) */
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_JPEG
+#include "stb_image.h"   /* stb_image 2.23 (public domain / MIT): the game's icon.jpg */
 
 static HWND g_hwnd; static HDC g_hdc; static HGLRC g_ctx, g_wctx;
 static volatile int g_ww=1280, g_wh=720; static u64 keys_held; static int g_fullscreen=0, g_want_fs=1;
@@ -150,15 +153,40 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l){
 
 static char g_title[256];
 
+/* the game's own icon: <exe>_data/icon.jpg from the player's dump (none in the source tree), as a window icon */
+static HICON game_icon(void){
+  char p[1100]; snprintf(p,sizeof p,"%sicon.jpg",g_datadir);
+  int w=0,h=0,n=0; unsigned char* px=stbi_load(p,&w,&h,&n,4); if(!px) return NULL;
+  BITMAPV5HEADER bh={0}; bh.bV5Size=sizeof bh; bh.bV5Width=w; bh.bV5Height=-h; bh.bV5Planes=1; bh.bV5BitCount=32;
+  bh.bV5Compression=BI_BITFIELDS; bh.bV5RedMask=0x00FF0000; bh.bV5GreenMask=0x0000FF00; bh.bV5BlueMask=0x000000FF; bh.bV5AlphaMask=0xFF000000;
+  void* bits=NULL; HDC dc=GetDC(NULL); HBITMAP col=CreateDIBSection(dc,(BITMAPINFO*)&bh,DIB_RGB_COLORS,&bits,NULL,0); ReleaseDC(NULL,dc);
+  HICON ic=NULL;
+  if(col && bits){
+    unsigned char* o=bits; for(int i=0;i<w*h;i++){ o[4*i]=px[4*i+2]; o[4*i+1]=px[4*i+1]; o[4*i+2]=px[4*i]; o[4*i+3]=px[4*i+3]; }  /* RGBA -> BGRA */
+    HBITMAP mask=CreateBitmap(w,h,1,1,NULL);
+    ICONINFO ii={TRUE,0,0,mask,col}; ic=CreateIconIndirect(&ii);
+    DeleteObject(mask);
+  }
+  if(col) DeleteObject(col);
+  stbi_image_free(px); return ic; }
+
+/* the English name from the dump's control.nacp (entry 0, 0x200 bytes), else the name the runtime was given */
+static void game_name(const char* fallback, char* out, size_t n){
+  char p[1100]; snprintf(p,sizeof p,"%scontrol.nacp",g_datadir); FILE* f=fopen(p,"rb"); char d[0x200]={0};
+  if(f){ size_t got=fread(d,1,sizeof d,f); fclose(f); if(got==sizeof d && d[0]){ snprintf(out,n,"%.*s",0x1ff,d); return; } }
+  snprintf(out,n,"%s",fallback); }
+
 /* window + message pump on their own thread so nothing stalls them */
 static void win_thread(void* arg){ (void)arg;
   HINSTANCE hi=GetModuleHandle(NULL);
   WNDCLASSA wc={0}; wc.style=CS_OWNDC; wc.lpfnWndProc=wndproc; wc.hInstance=hi; wc.hCursor=LoadCursor(NULL,IDC_ARROW);
-  wc.hIcon=LoadIcon(hi,MAKEINTRESOURCE(1)); if(!wc.hIcon) wc.hIcon=LoadIcon(NULL,IDI_APPLICATION);
+  HICON gic=game_icon();
+  wc.hIcon= gic? gic : LoadIcon(hi,MAKEINTRESOURCE(1)); if(!wc.hIcon) wc.hIcon=LoadIcon(NULL,IDI_APPLICATION);
   wc.hbrBackground=(HBRUSH)GetStockObject(BLACK_BRUSH); wc.lpszClassName="SwitchRecompWnd";
   RegisterClassA(&wc);
   RECT r={0,0,1280,720}; AdjustWindowRect(&r,WS_OVERLAPPEDWINDOW,FALSE);
   g_hwnd=CreateWindowA("SwitchRecompWnd",g_title,WS_OVERLAPPEDWINDOW|WS_VISIBLE,CW_USEDEFAULT,CW_USEDEFAULT,r.right-r.left,r.bottom-r.top,NULL,NULL,hi,NULL);
+  if(gic){ SendMessageA(g_hwnd,WM_SETICON,ICON_BIG,(LPARAM)gic); SendMessageA(g_hwnd,WM_SETICON,ICON_SMALL,(LPARAM)gic); }
   g_hdc=GetDC(g_hwnd);
   PIXELFORMATDESCRIPTOR pfd={sizeof pfd,1,PFD_DRAW_TO_WINDOW|PFD_SUPPORT_OPENGL|PFD_DOUBLEBUFFER,PFD_TYPE_RGBA,32};
   pfd.cDepthBits=24; pfd.cStencilBits=8; pfd.iLayerType=PFD_MAIN_PLANE;
@@ -171,7 +199,7 @@ static void win_thread(void* arg){ (void)arg;
 }
 
 void video_init(const char* title){
-  snprintf(g_title,sizeof g_title,"%s - SwitchRecomp  (F1 help)",title);
+  game_name(title,g_title,sizeof g_title);   /* "Pikmin 3 Deluxe": the game's own name (F1 still shows the help) */
   xinput_load(); timeBeginPeriod(1);
   g_ready=CreateEventA(NULL,TRUE,FALSE,NULL);
   _beginthread(win_thread,1<<20,NULL);
