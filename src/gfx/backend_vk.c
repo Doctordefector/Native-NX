@@ -1053,7 +1053,10 @@ static int pass_begin(VkExtent2D bare, uint32_t fb) {
         vk.vkCmdPipelineBarrier2(cb, &dep);
     }
     VkRenderingAttachmentInfo color[8] = {0}, depth = {0}, stencil = {0};
-    uint32_t w = UINT32_MAX, h = UINT32_MAX, layers = 1;
+    uint32_t w = UINT32_MAX, h = UINT32_MAX, layers = UINT32_MAX;
+    // [Pikmin 4] the layers the attachment views have (as vkb_view: a 3D target's slices, else the view's or image's
+    // layers): layered rendering (Unreal's colour LUT, 32 slices of a volume chosen by its geometry shader) needs them all
+#define ATT_LAYERS(im, v) ((im)->d.target == NVN_TEXTURE_TARGET_3D ? (im)->depth         : (v) && (v)->set_layers && (v)->nlayers ? (v)->nlayers : (im)->layers - ((v) && (v)->set_layers ? (v)->min_layer : 0))
     int ncolor = g_rt.n < 0 ? 0 : g_rt.n > 8 ? 8 : g_rt.n, any = 0;
     for (int i = 0; i < ncolor; i++) {
         color[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
@@ -1075,9 +1078,10 @@ static int pass_begin(VkExtent2D bare, uint32_t fb) {
         color[i].imageLayout = layout;
         color[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         color[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        uint32_t lw = level_size(im->width, v), lh = level_size(im->height, v);
+        uint32_t lw = level_size(im->width, v), lh = level_size(im->height, v), ll = ATT_LAYERS(im, v);
         if (lw < w) w = lw;
         if (lh < h) h = lh;
+        if (ll < layers) layers = ll;
         any = 1;
     }
     vkb_image *dim = g_rt.depth ? vkb_image_of(g_rt.depth) : NULL;
@@ -1095,11 +1099,15 @@ static int pass_begin(VkExtent2D bare, uint32_t fb) {
         vkb_image_written(dim);
         if (dim->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) depth = a;
         if (dim->aspect & VK_IMAGE_ASPECT_STENCIL_BIT) stencil = a;
-        uint32_t lw = level_size(dim->width, v), lh = level_size(dim->height, v);
+        uint32_t lw = level_size(dim->width, v), lh = level_size(dim->height, v), ll = ATT_LAYERS(dim, v);
         if (lw < w) w = lw;
         if (lh < h) h = lh;
+        if (ll < layers) layers = ll;
         any = 1;
     }
+#undef ATT_LAYERS
+    if (layers == UINT32_MAX || layers == 0) layers = 1;
+    if (layers > vkc.props.limits.maxFramebufferLayers) layers = vkc.props.limits.maxFramebufferLayers;
     if (!any) {
         if (ncolor || !bare.width || !bare.height) return 0;   // targets that cannot be attached: not drawn
         w = bare.width < vkc.props.limits.maxFramebufferWidth ? bare.width : vkc.props.limits.maxFramebufferWidth;
