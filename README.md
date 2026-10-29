@@ -1,7 +1,7 @@
-# Native-NX
+# Pikmin 3 Deluxe port (AArch32)
 
-Static recompilation of Nintendo Switch games to native Windows x86-64, extended to **32-bit (AArch32) games**.
-The first target is Pikmin 3 Deluxe, which is entirely A32 code.
+Static recompilation of 32-bit (AArch32) Switch games to native Windows x86-64. The first target is Pikmin 3
+Deluxe, which is entirely A32 code.
 
 Based on [SwitchRecomp](README.txt) v153 by MZ Labs (Apache 2.0, see `LICENSE.txt` and `NOTICE.txt`): its lifter
 pipeline and its low-level runtime (kernel, IPC services, nvdrv, Maxwell GPU to OpenGL), which runs the game's own
