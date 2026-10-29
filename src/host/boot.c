@@ -88,6 +88,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "UltraTears %s (commit %s)\n", ULTRS_VERSION, ULTRS_COMMIT);   // first line of every log
     if (argc > 2) { fprintf(stderr, "usage: UltraTears [exefs dir]\n"); return 2; }
     const char *exefs = argc == 2 ? argv[1] : default_exefs();
+    game_meta_init(exefs);
     plat_init();
     plat_crash_handler_install();
     if (!g_window) {

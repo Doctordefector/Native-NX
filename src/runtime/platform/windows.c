@@ -157,11 +157,16 @@ static void require_cpu(void) {
     ExitProcess(1);
 }
 
+// The game's name (src/host/game_meta.c) for the dialogs; weak, as other targets link this file without it
+__attribute__((weak)) const char *game_meta_title(void);
+static const char *app_name(void) { return game_meta_title ? game_meta_title() : "UltraTears"; }
+
 // Fatal error (rt_fatal_trace): the last FATAL / exception line of the log in a message box, when there is no console.
 void plat_fatal_notice(void) {
     if (!g_log_path[0]) return;
     fflush(stderr);
-    char text[1024] = "UltraTears stopped because of an error.";
+    char text[1024];
+    snprintf(text, sizeof text, "%s stopped because of an error.", app_name());
     FILE *f = fopen(g_log_path, "rb");
     if (f) {
         static char tail[16384];
@@ -177,7 +182,7 @@ void plat_fatal_notice(void) {
         if (line) {
             char *end = strchr(line, '\n');
             if (end) *end = 0;
-            snprintf(text, sizeof text, "UltraTears stopped because of an error:\n\n%.600s", line);
+            snprintf(text, sizeof text, "%s stopped because of an error:\n\n%.600s", app_name(), line);
             if (strstr(line, "Vulkan") || strstr(line, "VK_") || strstr(line, "vk")) {
                 size_t l = strlen(text);
                 snprintf(text + l, sizeof text - l, "\n\nUltraTears requires Vulkan 1.3 and VK_EXT_shader_object. "
@@ -187,7 +192,7 @@ void plat_fatal_notice(void) {
     }
     size_t l = strlen(text);
     snprintf(text + l, sizeof text - l, "\n\nDetails: %s", g_log_path);
-    MessageBoxA(NULL, text, "UltraTears", MB_ICONERROR | MB_OK);
+    MessageBoxA(NULL, text, app_name(), MB_ICONERROR | MB_OK);
 }
 
 void plat_init(void) {
