@@ -10,7 +10,7 @@ B=out/Pikmin3_build
 BACKEND=headless
 for a in "$@"; do case $a in gen) GEN=1;; headless|win32) BACKEND=$a;; esac; done
 if [ -n "$GEN" ] || [ ! -f $B/module.c ]; then "$ROOT/.venv/Scripts/python.exe" -I switchrecomp.py "$GAME" -o Pikmin3 --outdir out --no-build; fi
-FL="-O2 -fno-strict-aliasing -ffp-contract=off -fwrapv -w -I runtime -foptimize-sibling-calls"
+FL="$EXTRA -O2 -fno-strict-aliasing -ffp-contract=off -fwrapv -w -I runtime -foptimize-sibling-calls"
 # generated code: rebuild a .o when its .c (or the A32 headers) is newer
 ls $B/*.c | while read c; do o="${c%.c}.o"; if [ ! -f "$o" ] || [ "$c" -nt "$o" ] || [ runtime/cpu32.h -nt "$o" ]; then echo "$c"; fi; done > $B/todo.txt
 n=$(wc -l < $B/todo.txt); echo "compiling $n generated files"
@@ -19,9 +19,10 @@ grep -q FAIL $B/compile.log && exit 1
 # runtime
 RT="plat mem kernel ipc svc_core svc_hid svc_fs svc_vi nvdrv gpu gpu_engines gpu_3d main loader svc_launcher entry host1x"
 if [ $BACKEND = headless ]; then RT="$RT gpu_nogl backend_headless"; LIBS="-lgdi32 -lwinmm -luser32 -lshell32 -mconsole"
-else RT="$RT gpu_gl gl_load shader astc glq glq_gen lsfg_stub backend_win32"; LIBS="-lgdi32 -lwinmm -luser32 -lshell32 -lopengl32 -lcomdlg32 -mwindows"; fi
-mkdir -p build/rt_$BACKEND
-for s in $RT; do o=build/rt_$BACKEND/$s.o; if [ ! -f $o ] || [ runtime/$s.c -nt $o ] || [ runtime/rt.h -nt $o ]; then clang -O2 -w -fno-strict-aliasing -DSWR_NO_H264 -I runtime -c runtime/$s.c -o $o; fi; done
-ls $B/*.o > $B/objects.rsp; ls build/rt_$BACKEND/*.o >> $B/objects.rsp
-clang -fuse-ld=lld -o out/Pikmin3.exe @$B/objects.rsp -static $LIBS
+else RT="$RT gpu_gl gl_load shader astc glq glq_gen lsfg_stub rec_win32 backend_win32 bcn/bcn bcn/bcdec"; LIBS="-lgdi32 -lwinmm -luser32 -lshell32 -lopengl32 -lcomdlg32 -lmfplat -lmfreadwrite -lmfuuid -lole32 -mwindows"; fi
+mkdir -p build/rt_$BACKEND/bcn
+# mingw headers (gcc_v149 sysroot) only fill what clang64 lacks (Media Foundation for the F7 recorder)
+for s in $RT; do o=build/rt_$BACKEND/$s.o; src=runtime/$s.c; CC=clang; [ -f $src ] || { src=runtime/$s.cpp; CC=clang++; }; if [ ! -f $o ] || [ $src -nt $o ] || [ runtime/rt.h -nt $o ]; then $CC -O2 -w -fno-strict-aliasing -DSWR_NO_H264 -I runtime -I runtime/bcn -I "$ROOT/.cache/deps/include" -idirafter "$ROOT/.cache/deps/mingw/gcc/Library/x86_64-w64-mingw32/sysroot/usr/include" -c $src -o $o; fi; done
+ls $B/*.o > $B/objects.rsp; find build/rt_$BACKEND -name "*.o" >> $B/objects.rsp
+clang++ -fuse-ld=lld -o out/Pikmin3.exe @$B/objects.rsp -static -L "$ROOT/.cache/deps/lib" $LIBS
 echo "built out/Pikmin3.exe ($BACKEND)"

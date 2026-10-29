@@ -445,13 +445,39 @@ static int auddev_disp(SvcObj* o, IpcCtx* c){ (void)o;
   }
   return 0; }
 
+/* audren GetWorkBufferSize: the renderer service's budget for the IPC AudioRendererParameter (raw data +0, counts at +0..+0x28), revisions 1..15.
+   Ported from nxnative dm/host/hle_audren.c ar_service_work_size. 0 = unknown revision / invalid parameter */
+static u64 ar_al(u64 n, u64 a){ return (n+a-1)&~(a-1); }
+static u64 audren_work_size(IpcCtx* c){
+  u32 rev=in32(c,0x30);   /* IPC (service) layout: revision at +0x30, not the SDK struct's +0x34 */
+  if((rev&0xffffff)!=0x564552 || rev<0x31564552 || rev>0x3f564552) return 0;
+  unsigned r=(rev>>24)-0x30; u64 n[11];
+  for(int i=0;i<11;i++){ if(i==8){ n[i]=in32(c,0x20)&0xff; continue; } i32 v=(i32)in32(c,i*4); if(v<0 || v>0x100000) return 0; n[i]=(u64)v; }
+  u64 mix=n[2], sub=n[3], voices=n[4], sinks=n[5], effects=n[6], perf=n[7], splitters=n[9], dest=n[10], mixes=sub+1;
+  u64 size=ar_al(((sinks+sub)*0x3c0+n[1]*4)*(mix+6),64);
+  size+=ar_al(mix*4,64)+sub*0x400+mixes*0x940+ar_al(mixes*8,16);
+  size+=voices*0x1d0+ar_al(voices*(r>=15? 0x238 : 0x220),16)+ar_al(voices*8,16);
+  if(r>=2){ u64 graph=mixes*mixes*4+mixes*12+2*ar_al(mixes,64)/8+ar_al(mixes*mixes,64)/8;
+    size+=ar_al(graph,16)+splitters*0x20+ar_al(dest*(r>=12? (r>=15? 0x130 : 8) : 0xe0),16);
+    if(r<5) size+=ar_al(dest*4,16); }
+  size+=(effects+voices*4)*0x20+0x50;
+  if(r>=12 && splitters && dest) size+=ar_al(dest*(r>=14? 0xe0 : 0x80),64);
+  size=ar_al(size+(r>=9? effects*0x80 : 0),64);
+  size+=(sinks+sub)*0x280+effects*(r>=9? 0x530 : 0x4b0)+sinks*0x170+voices*0x100+0x40;
+  if(perf){ u64 frame=(sub+voices+sinks+effects+1)*(r>=5? 0x18 : 0x10)+(r>=5? 0x990 : 0x658); size+=ar_al(frame*(perf+1),64)+0xc0; }
+  u64 commands=0x18000;
+  if(r>=5) commands=effects*0x540+sub*0x3f24+sinks*0x130+dest*0x360+voices*(splitters*0x50+(r>=8? 0x284 : 0x250))+(voices+sub+effects+sinks+0x65)*0x28+0x2c4;
+  size=ar_al(size+commands+0x7e,0x1000);
+  LOG("audren: work buffer %llx (revision %u, %llu voices)\n",(unsigned long long)size,r,(unsigned long long)voices);
+  return size; }
+
 static int audren_disp(SvcObj* o, IpcCtx* c){
   switch(c->cmd){
     case 0: { SvcObj* r=svcobj_new("IAudioRenderer",audren_obj,0x100);
       memcpy(r->data,c->raw,0x34<0x100?0x34:0x100);
       r->u[0]=in32(c,0); r->u[1]=in32(c,4); r->u[2]=in32(c,8); r->u[3]=1;
       out_obj(c,r); return 0; }
-    case 1: { u64 sz=0x4000; u32 voices=in32(c,0x10), sinks=in32(c,0x14), effects=in32(c,0x1C); sz+= (u64)voices*0x400 + sinks*0x200 + effects*0x800 + 0x40000; out64(c,sz); return 0; }
+    case 1: { u64 sz=audren_work_size(c); if(!sz){ WARN("audren: GetWorkBufferSize with an unknown revision %x, refused (%u raw bytes:",in32(c,0x30),c->raw_size); for(u32 o=0;o<c->raw_size;o+=4) WARN(" %x",in32(c,o)); WARN(")\n"); return 0x2C99; } /* ponytail: not the real audio result code; add it when a game hits this */ out64(c,sz); return 0; }
     case 2: case 4: out_obj(c,svcobj_new("IAudioDevice",auddev_disp,0)); return 0;
   }
   return quiet_ok(o,c); }

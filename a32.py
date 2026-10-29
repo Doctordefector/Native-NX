@@ -286,6 +286,10 @@ def misc(w, pc, cond):
         raise Undef()
     if op2 == 3 and op == 1:
         return ('blr', rd(bits(w, 3, 0), pc), cond)
+    if op2 == 4 and not bit(w, 8):   # CRC32{B,H,W} / CRC32C{B,H,W}: Rd = crc(Rn, Rm)
+        sz = 1 << op
+        if sz == 8: raise Undef()
+        return wrap(cond, 'SR(%d,swr_crc32(R(%d),R(%d),%d,%d));' % (bits(w, 15, 12), bits(w, 19, 16), bits(w, 3, 0), sz, bit(w, 9)))
     if op2 == 5:     # QADD QSUB QDADD QDSUB
         d = bits(w, 15, 12); n = bits(w, 19, 16); m = bits(w, 3, 0)
         f = {0: 'a32_qadd(c,(i32)R(%d),(i32)R(%d))' % (m, n), 1: 'a32_qsub(c,(i32)R(%d),(i32)R(%d))' % (m, n),
@@ -637,7 +641,7 @@ def _emit(w, pc):
     if op == 0:
         if bit(w, 4) and bit(w, 7):
             if bits(w, 6, 5) == 0:
-                if bits(w, 24, 23) == 0: return multiply(w, pc, cond)
+                if not bit(w, 24): return multiply(w, pc, cond)
                 if bit(w, 24) and bits(w, 11, 10) == 3: return sync(w, pc, cond)
                 raise Undef()                      # SWP (deprecated)
             if bit(w, 24) == 0 and bit(w, 21) and False: pass

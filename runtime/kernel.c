@@ -380,6 +380,16 @@ static u32 svc_query(u64 info, u64 addr){
   gw32(info+28,b.ipc); gw32(info+32,b.dev); gw32(info+36,0);
   return 0; }
 
+/* crash/abort reports: is [a, a+n) committed game memory (reading it must not fault) */
+static int game_readable(u64 a, u64 n){ if(a<0x10000 || a+n>AS_SIZE) return 0; MemBlock b; mem_query(a,&b);
+  return b.state!=MS_FREE && b.state!=MS_INACCESSIBLE && a+n<=b.addr+b.size; }
+
+/* printable NUL-terminated string (4..200 chars) at game address a: its length, 0 if none */
+static int game_str(u64 a, const char** out){ if(!game_readable(a,1)) return 0; MemBlock b; mem_query(a,&b);
+  u64 room=b.addr+b.size-a; int lim= room<200? (int)room : 200;
+  const char* p=(const char*)GP(a); int n=0; while(n<lim && p[n]>=32 && p[n]<127) n++;
+  *out=p; return n>=4 && (n==200 || (n<lim && p[n]==0))? n : 0; }
+
 static u32 svc_map_memory(u64 dst, u64 src, u64 size){
   if((dst|src|size)&0xFFF || !size) return R_BADADDR;
   int in_stack= dst>=STACK_BASE && dst+size<=STACK_BASE+STACK_SIZE;
@@ -454,6 +464,8 @@ static u64 image_memory(void){
   return sz; }
 
 static u64 used_memory(void){ return image_memory()+g_heap_size+g_phys_mapped; }
+/* Horizon caps a process's total memory at its heap region size (KProcess m_max_process_memory): 32-bit games size their heap from it */
+static u64 proc_mem_max(void){ u64 t=mem_total(); return t<HEAP_SIZE? t : HEAP_SIZE; }
 
 void mem_report(char* out, int n){ snprintf(out,n,"heap %llu MB, mapped physical memory %llu MB, used %llu MB of %llu MB",
   (unsigned long long)(g_heap_size>>20),(unsigned long long)(g_phys_mapped>>20),(unsigned long long)(used_memory()>>20),(unsigned long long)(mem_total()>>20)); }
@@ -472,7 +484,7 @@ static u32 svc_get_info_(u32 id0, u32 h, u64 id1, u64* out){
     case 3: *out=ALIAS_SIZE; return 0;
     case 4: *out=HEAP_BASE; return 0;
     case 5: *out=HEAP_SIZE; return 0;
-    case 6: *out=mem_total(); return 0;                          /* total app memory */
+    case 6: *out=proc_mem_max(); return 0;                         /* total app memory */
     case 7: *out=used_memory(); return 0;
     case 8: *out=0; return 0;
     case 9: *out=0; return 0;                                    /* resource limit handle 0 */
@@ -487,7 +499,7 @@ static u32 svc_get_info_(u32 id0, u32 h, u64 id1, u64* out){
     case 18: *out=g_title_id; return 0;
     case 19: *out=0; return 0;
     case 20: { static u64 uectx; if(!uectx) uectx=kmem_alloc(0x1000,MS_TLS,PERM_RW); *out=uectx; return 0; }
-    case 21: *out=mem_total(); return 0;
+    case 21: *out=proc_mem_max(); return 0;
     case 22: *out=used_memory(); return 0;
     case 23: *out=1; return 0;
     case 24: { int live=0; for(int i=0;i<g_nthreads;i++) if(g_threads[i] && g_threads[i]->state!=2) live++; *out=(u64)(live<96? 96-live : 0); return 0; }  /* FreeThreadCount: Unity skips its job threads if this is 0 */
@@ -647,7 +659,7 @@ static void swr_svc_(CPU* c, u32 imm){
   KThread* t=kthread_cur();
   u64* x=c->x;
   switch(imm){
-  case 0x01: { u64 a=mem_heap_set(x[1]); if(!a && x[1]){ x[0]=R_OUTOFMEM; return; } x[0]=0; x[1]=HEAP_BASE; return; }
+  case 0x01: { u64 a=mem_heap_set(x[1]); logf_(1,"SetHeapSize %llx -> %s\n",(unsigned long long)x[1],a||!x[1]? "ok" : "out of memory"); if(!a && x[1]){ x[0]=R_OUTOFMEM; return; } x[0]=0; x[1]=HEAP_BASE; return; }
   case 0x02: mem_set_state(x[0],x[1],0xFFFFFFFFu,(u32)x[2]); x[0]=0; return;
   case 0x03: mem_set_attr(x[0],x[1],(u32)x[2],(u32)x[3]); x[0]=0; return;
   case 0x04: x[0]=svc_map_memory(x[0],x[1],x[2]); return;
@@ -712,11 +724,10 @@ static void swr_svc_(CPU* c, u32 imm){
     if(x[1] && x[2]>=4 && x[2]<0x1000){ u8 tmp[64]; memcpy(tmp,GP(x[1]),x[2]<64?x[2]:64); WARN("  data: "); for(u64 i=0;i<(x[2]<64?x[2]:64);i++) WARN("%02x",tmp[i]); WARN("\n"); }
     kernel_dump_regs(c);
     /* strings pointed to by regs, often the abort message */
-    for(int r=0;r<31;r++){ u64 a=c->x[r]; if(a<0x10000 || a>=AS_SIZE-256) continue; MemBlock b; mem_query(a,&b);
-      if(b.state==MS_FREE || b.state==MS_INACCESSIBLE) continue;   /* not committed: reading it would fault */
-      u64 room=b.addr+b.size-a; int lim= room<200? (int)room : 200;
-      const char* p=(const char*)GP(a); int n=0; while(n<lim && p[n]>=32 && p[n]<127) n++;
-      if(n>=4 && (n==200 || (n<lim && p[n]==0))) WARN("  x%d -> \"%.*s\"\n",r,n,p); }
+    for(int r=0;r<31;r++){ const char* p; int n=game_str(c->x[r],&p); if(n) WARN("  x%d -> \"%.*s\"\n",r,n,p); }
+    if(g_a32){ /* 32-bit SDK code keeps frame pointers: callers from the r11 chain, abort strings (condition, function, file) from the stack */
+      u32 fp=(u32)c->x[11]; WARN("  callers:"); for(int i=0;i<16 && game_readable(fp,8);i++){ WARN(" %x",*(u32*)GP(fp+4)); u32 nf=*(u32*)GP(fp); if(nf<=fp) break; fp=nf; } WARN("\n");
+      u32 sp=(u32)c->x[13]; for(u32 o=0;o<0x400 && game_readable(sp+o,4);o+=4){ const char* p; int n=game_str(*(u32*)GP(sp+o),&p); if(n) WARN("  [sp+%x] -> \"%.*s\"\n",o,n,p); } }
     fatal("The game stopped (svcBreak). See the .log for details.");
     return; }
   case 0x27: { u64 n=x[1]; if(n>4096) n=4096; char buf[4100]; memcpy(buf,GP(x[0]),n); buf[n]=0; LOG("[game] %s%s",buf,(n&&buf[n-1]=='\n')?"":"\n"); x[0]=0; return; }

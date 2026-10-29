@@ -17,6 +17,17 @@
 #define A32Q      (c->user[0])
 #define A32GE     (c->user[1])
 
+/* debug: every call must preserve r4-r11 and sp (AAPCS). -DA32_ABICHECK logs the first callees that don't */
+#ifdef A32_ABICHECK
+void a32_abi_report(CPU* c, u32 site, u32 callee, const u32* before);
+#define ABI_SAVE() u32 abs_[9]={R(4),R(5),R(6),R(7),R(8),R(9),R(10),R(11),R(13)}
+#define ABI_CHECK(site,callee) do{ if(UNLIKELY(R(4)!=abs_[0]||R(5)!=abs_[1]||R(6)!=abs_[2]||R(7)!=abs_[3]||R(8)!=abs_[4]|| \
+  R(9)!=abs_[5]||R(10)!=abs_[6]||R(11)!=abs_[7]||R(13)!=abs_[8])) a32_abi_report(c,site,callee,abs_); }while(0)
+#else
+#define ABI_SAVE() (void)0
+#define ABI_CHECK(site,callee) (void)0
+#endif
+
 SWR_INLINE u32 a32_lsl_c(CPU* c, u32 x, u32 s, u32* co){ s&=255; if(!s){ *co=c->cf; return x; } if(s<32){ *co=(x>>(32-s))&1; return x<<s; } *co= s==32? x&1 : 0; return 0; }
 SWR_INLINE u32 a32_lsr_c(CPU* c, u32 x, u32 s, u32* co){ s&=255; if(!s){ *co=c->cf; return x; } if(s<32){ *co=(x>>(s-1))&1; return x>>s; } *co= s==32? x>>31 : 0; return 0; }
 SWR_INLINE u32 a32_asr_c(CPU* c, u32 x, u32 s, u32* co){ s&=255; if(!s){ *co=c->cf; return x; } if(s<32){ *co=(x>>(s-1))&1; return (u32)((i32)x>>s); } *co=x>>31; return (u32)((i32)x>>31); }

@@ -2,10 +2,7 @@
 #ifndef FP16_FP16_H
 #define FP16_FP16_H
 
-#if defined(__cplusplus) && (__cplusplus >= 201103L)
-	#include <cstdint>
-	#include <cmath>
-#elif !defined(__OPENCL_VERSION__)
+#if !defined(__OPENCL_VERSION__)   /* C headers in C++ too: no std:: is used, and some toolchains ship no <cmath> */
 	#include <stdint.h>
 	#include <math.h>
 #endif

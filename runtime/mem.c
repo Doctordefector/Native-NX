@@ -127,11 +127,12 @@ int g_a32;
 u64 g_as_size=0x2000000000ull, g_as_base=0x08000000ull, g_heapr_base=0x100000000ull, g_heapr_size=0x200000000ull,
     g_alias_base=0x300000000ull, g_alias_size=0x1000000000ull, g_stack_base=0x1300000000ull, g_stack_size=0x100000000ull,
     g_kern_base=0x1400000000ull, g_kern_end=0x1800000000ull;
-void mem_layout(int a32){
+void mem_layout(int a32, int as_type){
   g_a32=a32; if(!a32) return;
   g_as_base=0x200000ull; g_as_size=0x100000000ull;
-  g_heapr_base=0x40000000ull; g_heapr_size=0x60000000ull;      /* 1.5 GB */
-  g_alias_base=0xA0000000ull; g_alias_size=0x30000000ull;
+  /* Horizon (svc_memory_map.hpp): 1 GB heap + 1 GB alias; npdm AddressSpace32BitNoReserved (type 2) folds the alias into a 2 GB heap */
+  g_heapr_base=0x40000000ull; g_heapr_size= as_type==2? 0x80000000ull : 0x40000000ull;
+  g_alias_base=0x80000000ull; g_alias_size= as_type==2? 0 : 0x40000000ull;
   g_stack_base=0xD0000000ull; g_stack_size=0x10000000ull;
   g_kern_base=0xE0000000ull;  g_kern_end=0xFFFF0000ull;
   if(g_heap_max>g_heapr_size) g_heap_max=g_heapr_size; }

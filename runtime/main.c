@@ -114,6 +114,13 @@ static void rt_wfe(CPU* c){ (void)c; plat_yield(); }
 const RtAPI g_rtapi={swr_svc,rt_undef,rt_note_hint,rt_ticks,rt_brk,rt_fpcr,rt_sev,rt_wfe};
 
 /* ============================================================ system errors */
+static u64 game_fn_at(void* host_pc){ u64 best=0, ga=0; if(g_mod) for(u32 i=0;i<g_mod->nentries;i++){ u64 f=(u64)(size_t)g_mod->entry_fn[i]; if(f<=(u64)(size_t)host_pc && f>best){ best=f; ga=g_mod->entry_addr[i]; } }
+  return best && (u64)(size_t)host_pc-best<0x100000? ga : 0; }
+
+void watch_report(void* host_pc, u64 host_addr){ /* SWR_WATCH hit (plat.c) */
+  static volatile long n; if(n++>=64) return; KThread* t=kthread_cur(); u64 ga=host_addr-(u64)(size_t)g_mem;
+  logf_(0,"watch: [%llx]=%x written in game function %llx, lr=%llx thread %s\n",(unsigned long long)ga,*(u32*)(size_t)host_addr,(unsigned long long)game_fn_at(host_pc),
+    t? (unsigned long long)t->cpu.x[g_mod&&g_mod->a32? 14 : 30] : 0ull, t? t->name : "-"); }
 void crash_report(void* host_pc, void* fault, int sig){
   KThread* t=kthread_cur();
   u64 ga=(u64)((u8*)fault-g_mem);
@@ -375,16 +382,18 @@ int swr_main(int argc, char** argv){
   if(load_code()) fatal("Could not load the game's recompiled code.");
   if(g_mod->abi!=1) fatal("The recompiled code is from another SwitchRecomp version.");
   g_title_id=g_mod->title_id;
-  mem_layout(g_mod->a32);
+  int as_type=0;
+  { /* npdm SystemResourceSize; newer SDKs only init their VM allocator when > 0 */
+    extern u64 g_sysres_size; char q[1200]; snprintf(q,sizeof q,"%sexefs/main.npdm",g_datadir); FILE* f=fopen(q,"rb");
+    if(f){ u8 h[0x20]; if(fread(h,1,0x20,f)==0x20 && !memcmp(h,"META",4)){ u32 v; memcpy(&v,h+0x14,4); g_sysres_size=v; as_type=(h[0xC]>>1)&7; } fclose(f); }
+  }
+  mem_layout(g_mod->a32,as_type);
   if(g_mod->a32) LOG("AArch32 game: 32-bit address space\n");
   mem_init(); kernel_init(); build_dispatch();
   if(g_mod->init) g_mod->init(&g_rtapi);
   load_hints();
   if(loader_load()) fatal("Could not load the game executables from %sexefs/",g_datadir);
-  { /* npdm SystemResourceSize; newer SDKs only init their VM allocator when > 0 */
-    extern u64 g_sysres_size; char q[1200]; snprintf(q,sizeof q,"%sexefs/main.npdm",g_datadir); FILE* f=fopen(q,"rb");
-    if(f){ u8 h[0x20]; if(fread(h,1,0x20,f)==0x20 && !memcmp(h,"META",4)){ u32 v; memcpy(&v,h+0x14,4); g_sysres_size=v; } fclose(f); }
-    LOG("npdm: system resource %.1f MB\n",g_sysres_size/1048576.0); }
+  { extern u64 g_sysres_size; LOG("npdm: system resource %.1f MB, address space type %d, heap region %llu MB\n",g_sysres_size/1048576.0,as_type,(unsigned long long)(HEAP_SIZE>>20)); }
   services_init(); romfs_init(); gpu_init();
   video_init(g_mod->title? g_mod->title : g_exename);
   { extern void plat_prof_start(int); if(g_opt_prof){ plat_prof_start(0); LOG("profile: active (profile.txt every 10 s)\n"); } }

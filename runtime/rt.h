@@ -83,7 +83,7 @@ extern int g_a32;
 #define STACK_SIZE     g_stack_size
 #define KERN_BASE      g_kern_base        /* TLS, kernel stacks, our own shmem */
 #define KERN_END       g_kern_end
-void mem_layout(int a32);
+void mem_layout(int a32, int as_type);   /* as_type: npdm flags bits 3:1 */
 
 enum { MS_FREE=0x00000000, MS_IO=0x00182001, MS_STATIC=0x00042002, MS_CODE=0x04DC7E03, MS_CODEDATA=0x07FEBD04,
   MS_NORMAL=0x077EBD05, MS_SHARED=0x04402006, MS_ALIASCODE=0x04DD7E08, MS_ALIASCODEDATA=0x07FFBD09, MS_IPC=0x045C3C0A,
